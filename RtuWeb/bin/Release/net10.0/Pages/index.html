@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RTU 每日報表</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:#f4f7fa;color:#20374b}
+    header{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid #d5dfe8;padding:12px 20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+    header strong{margin-right:auto}nav{display:flex;gap:6px;flex-wrap:wrap}button,select{font:inherit;padding:9px 13px;border:1px solid #c7d5e1;border-radius:6px;background:white;color:inherit;cursor:pointer}
+    button[aria-pressed=true]{background:#165d91;color:white;border-color:#165d91}button:disabled,select:disabled{opacity:.5;cursor:default}
+    main{max-width:1000px;margin:36px auto;padding:0 20px}section.card{background:white;padding:20px;margin:18px 0;border:1px solid #dce5ed;border-radius:10px}
+    section.card button{margin:4px 8px 4px 0}h1{font-size:28px}h2{font-size:20px;margin-top:0}#message{margin:16px 20px}iframe{width:100%;height:calc(100dvh - var(--header-height,90px) - 55px);border:0;background:#fff}[hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <header id="header">
+    <strong>RTU 每日報表</strong>
+    <label>報表日期 <select id="dates" disabled aria-label="報表日期"></select></label>
+    <nav aria-label="報表切換">
+      <button type="button" data-view="home" aria-pressed="true">首頁</button>
+      <button type="button" data-view="main" disabled aria-pressed="false">主報表</button>
+      <button type="button" data-view="no-reason" disabled aria-pressed="false">無原因</button>
+      <button type="button" data-view="summary" disabled aria-pressed="false">當日彙總</button>
+    </nav>
+  </header>
+  <p id="message" role="status" aria-live="polite">讀取中…</p>
+  <main id="home"><h1>最近七個報表日期</h1><div id="reports"></div></main>
+  <iframe id="report" title="RTU 報表內容" hidden></iframe>
+  <script>
+    const labels={main:'主報表','no-reason':'無原因',summary:'當日彙總'};
+    const select=document.getElementById('dates'),home=document.getElementById('home');
+    const frame=document.getElementById('report'),message=document.getElementById('message');
+    let view='home',requestNumber=0;
+    async function show(next){
+      view=next;const request=++requestNumber;
+      document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));
+      home.hidden=view!=='home';frame.hidden=true;
+      frame.removeAttribute('src');
+      if(view==='home'){message.textContent=select.options.length?'選擇日期及報表種類以查看內容。':'尚無已完成的報表。';return;}
+      const date=select.value;
+      if(!date){message.textContent='尚無可查看的報表。';return;}
+      message.textContent='讀取 '+date+' '+labels[view]+'…';
+      const url='/reports/'+encodeURIComponent(date)+'/'+view;
+      try{
+        const response=await fetch(url,{method:'HEAD',cache:'no-store'});
+        if(request!==requestNumber)return;
+        if(!response.ok){message.textContent=response.status===404?date+' 的「'+labels[view]+'」檔案不存在，請確認已放入對應 HTML。':'報表暫時無法讀取，請稍後重試。';return;}
+        frame.src=url;frame.hidden=false;message.textContent=date+' · '+labels[view];
+      }catch(error){if(request===requestNumber)message.textContent='報表連線失敗，請確認網站仍在執行。';}
+    }
+    document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>show(b.dataset.view)));
+    select.addEventListener('change',()=>show(view));
+    new ResizeObserver(entries=>document.documentElement.style.setProperty('--header-height',entries[0].target.offsetHeight+'px')).observe(document.getElementById('header'));
+    fetch('/api/reports',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error('dates');return r.json();}).then(dates=>{
+      for(const date of dates){
+        const option=document.createElement('option');option.value=date;option.textContent=date;select.append(option);
+        const section=document.createElement('section');section.className='card';
+        const title=document.createElement('h2');title.textContent=date;section.append(title);
+        for(const [type,label] of Object.entries(labels)){
+          const button=document.createElement('button');button.type='button';button.textContent=label;
+          button.addEventListener('click',()=>{select.value=date;show(type);});section.append(button);
+        }
+        document.getElementById('reports').append(section);
+      }
+      select.disabled=!dates.length;
+      document.querySelectorAll('nav button[data-view]:not([data-view=home])').forEach(b=>b.disabled=!dates.length);
+      show('home');
+    }).catch(()=>message.textContent='報表清單讀取失敗，請重新整理頁面。');
+  </script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RTU 每日報表</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:#f4f7fa;color:#20374b}
+    header{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid #d5dfe8;padding:12px 20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+    header strong{margin-right:auto}nav{display:flex;gap:6px;flex-wrap:wrap}button,select{font:inherit;padding:9px 13px;border:1px solid #c7d5e1;border-radius:6px;background:white;color:inherit;cursor:pointer}
+    button[aria-pressed=true]{background:#165d91;color:white;border-color:#165d91}button:disabled,select:disabled{opacity:.5;cursor:default}
+    main{max-width:1000px;margin:36px auto;padding:0 20px}section.card{background:white;padding:20px;margin:18px 0;border:1px solid #dce5ed;border-radius:10px}
+    section.card button{margin:4px 8px 4px 0}h1{font-size:28px}h2{font-size:20px;margin-top:0}#message{margin:16px 20px}iframe{width:100%;height:calc(100dvh - var(--header-height,90px) - 55px);border:0;background:#fff}[hidden]{display:none!important}
+  </style>
+</head>
+<body>
+  <header id="header">
+    <strong>RTU 每日報表</strong>
+    <nav aria-label="報表切換">
+      <button type="button" data-view="home" aria-pressed="true">首頁</button>
+      <button type="button" data-view="main" disabled aria-pressed="false">主報表</button>
+      <button type="button" data-view="summary" disabled aria-pressed="false">當日彙總</button>
+      <button type="button" data-view="no-reason" disabled aria-pressed="false">無原因</button>
+    </nav>
+  </header>
+  <p id="message" role="status" aria-live="polite">讀取中…</p>
+  <main id="home"><h1>最近七個報表日期</h1><div id="reports"></div></main>
+  <iframe id="report" title="RTU 報表內容" hidden></iframe>
+  <dialog id="copy-dialog" style="width:min(900px,95vw);max-height:85vh;border:1px solid #c7d5e1;border-radius:8px">
+    <h2 id="copy-title">當日彙總</h2>
+    <p id="copy-status" role="status">若瀏覽器未允許自動複製，請按下方按鈕，或選取預覽內容後按 Ctrl+C。</p>
+    <button type="button" id="copy-again">複製到剪貼簿</button>
+    <button type="button" id="copy-close">關閉</button>
+    <div id="copy-preview" tabindex="0" style="background:white;color:black;padding:16px;margin-top:16px;max-height:55vh;overflow:auto"></div>
+  </dialog>
+  <script>
+    const labels={main:'主報表',summary:'當日彙總','no-reason':'無原因'};
+    const home=document.getElementById('home');
+    const frame=document.getElementById('report'),message=document.getElementById('message');
+    let view='home',requestNumber=0,selectedDate='';
+    const copyDialog=document.getElementById('copy-dialog'),copyPreview=document.getElementById('copy-preview');
+    let preparedCopy=null,copyBusy=false;
+    const withoutCount=text=>text.replace(/\s*[（(]\s*[\d,]+\s*[）)]\s*$/,'').trim();
+    function safeClone(source){
+      const clone=source.cloneNode(true);
+      for(const element of [clone,...clone.querySelectorAll('*')]){
+        if(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','LINK','IMG'].includes(element.tagName)){element.remove();continue;}
+        for(const attribute of [...element.attributes])if(!['class','style'].includes(attribute.name))element.removeAttribute(attribute.name);
+      }
+      return clone;
+    }
+    async function buildSummaryCopy(date){
+      const response=await fetch('/reports/'+encodeURIComponent(date)+'/summary',{cache:'no-store'});
+      if(!response.ok)throw Error(response.status===404?'該日期的當日彙總不存在。':'當日彙總讀取失敗。');
+      const source=new DOMParser().parseFromString(await response.text(),'text/html');
+      const main=source.querySelector('#main-view');
+      if(!main)throw Error('找不到當日彙總主畫面，未複製其他頁面內容。');
+      const content=document.createElement('div');
+      for(const category of main.querySelectorAll('.category')){
+        const group=document.createElement('div');group.className='category';let others=false;
+        for(const child of category.children){
+          if(child.classList.contains('category-title')){
+            const title=safeClone(child);title.textContent=withoutCount(child.textContent);group.append(title);
+          }else if(child.classList.contains('subcategory-title')){
+            others=withoutCount(child.textContent).toLowerCase()==='others';group.append(safeClone(child));
+          }else if(others && child.classList.contains('row'))group.append(safeClone(child));
+        }
+        if(group.querySelector('.category-title'))content.append(group);
+      }
+      if(!content.children.length)throw Error('主畫面沒有可複製的分類內容。');
+      // Compute the report's own styles in an isolated document, then inline them for Notes.
+      const measurement=document.createElement('iframe');
+      measurement.setAttribute('sandbox','allow-same-origin');measurement.title='複製格式準備';
+      measurement.style.cssText='position:fixed;left:-10000px;top:0;width:1000px;height:800px;border:0';
+      document.body.append(measurement);
+      try{
+        const doc=measurement.contentDocument;
+        for(const style of source.querySelectorAll('style'))doc.head.append(doc.importNode(style,true));
+        const container=doc.createElement('div');container.className='container';doc.body.append(container);
+        container.append(doc.importNode(content,true));
+        const properties=['font-family','font-size','font-weight','font-style','color','background-color','line-height','white-space','text-decoration','text-align','margin-top','margin-bottom','margin-left','padding-top','padding-bottom','border-bottom-width','border-bottom-style','border-bottom-color'];
+        const styledElements=[container,...container.querySelectorAll('*')].map(element=>{
+          const computed=measurement.contentWindow.getComputedStyle(element);
+          return [element,properties.map(property=>[property,computed.getPropertyValue(property)])];
+        });
+        for(const [element,values] of styledElements){
+          element.removeAttribute('style');
+          for(const [property,value] of values)element.style.setProperty(property,value);
+          element.removeAttribute('class');
+        }
+        const text=[...container.firstElementChild.children].map(group=>[...group.children].map(row=>row.textContent).join('\n')).join('\n\n');
+        return {html:container.outerHTML,text};
+      }finally{measurement.remove();}
+    }
+    async function writeSummaryCopy(payload){
+      if(navigator.clipboard?.write && window.ClipboardItem){
+        try{
+          await navigator.clipboard.write([new ClipboardItem({'text/html':new Blob([payload.html],{type:'text/html'}),'text/plain':new Blob([payload.text],{type:'text/plain'})})]);
+          return true;
+        }catch(error){/* HTTP intranet or denied permission: use a user-triggered copy event. */}
+      }
+      let handled=false;
+      const onCopy=event=>{
+        if(!event.clipboardData)return;
+        event.clipboardData.setData('text/html',payload.html);event.clipboardData.setData('text/plain',payload.text);
+        event.preventDefault();handled=true;
+      };
+      document.addEventListener('copy',onCopy);
+      try{return document.execCommand('copy') && handled;}catch(error){return false;}
+      finally{document.removeEventListener('copy',onCopy);}
+    }
+    async function copySummary(date,button){
+      if(copyBusy)return;copyBusy=true;button.disabled=true;const caption=button.textContent;button.textContent='準備中…';
+      const status=button.parentElement.querySelector('.copy-feedback');
+      try{
+        preparedCopy=await buildSummaryCopy(date);
+        if(await writeSummaryCopy(preparedCopy)){status.textContent='已複製 '+date+' 當日彙總，可貼到 Notes。';}
+        else{
+          document.getElementById('copy-title').textContent=date+' 當日彙總';
+          document.getElementById('copy-status').textContent='請按「複製到剪貼簿」；若仍受限，可選取下方內容後按 Ctrl+C。';
+          copyPreview.innerHTML=preparedCopy.html;copyDialog.showModal();
+          const range=document.createRange();range.selectNodeContents(copyPreview);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);
+          status.textContent='已準備 '+date+' 的複製內容。';
+        }
+      }catch(error){preparedCopy=null;status.textContent=error.message;}
+      finally{button.disabled=false;button.textContent=caption;copyBusy=false;}
+    }
+    document.getElementById('copy-close').addEventListener('click',()=>copyDialog.close());
+    document.getElementById('copy-again').addEventListener('click',async()=>{
+      if(!preparedCopy)return;
+      document.getElementById('copy-status').textContent=await writeSummaryCopy(preparedCopy)?'已複製，可貼到 Notes。':'瀏覽器未允許複製，請選取下方內容後按 Ctrl+C。';
+    });
+    async function show(next){
+      view=next;const request=++requestNumber;
+      document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));
+      home.hidden=view!=='home';frame.hidden=true;
+      frame.removeAttribute('src');
+      if(view==='home'){message.textContent=selectedDate?'請點選下方日期卡片中的報表。':'尚無已完成的報表。';return;}
+      const date=selectedDate;
+      if(!date){message.textContent='尚無可查看的報表。';return;}
+      message.textContent='讀取 '+date+' '+labels[view]+'…';
+      const url='/reports/'+encodeURIComponent(date)+'/'+view;
+      try{
+        const response=await fetch(url,{method:'HEAD',cache:'no-store'});
+        if(request!==requestNumber)return;
+        if(!response.ok){message.textContent=response.status===404?date+' 的「'+labels[view]+'」檔案不存在，請確認已放入對應 HTML。':'報表暫時無法讀取，請稍後重試。';return;}
+        frame.src=url;frame.hidden=false;message.textContent=date+' · '+labels[view];
+      }catch(error){if(request===requestNumber)message.textContent='報表連線失敗，請確認網站仍在執行。';}
+    }
+    document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>show(b.dataset.view)));
+    new ResizeObserver(entries=>document.documentElement.style.setProperty('--header-height',entries[0].target.offsetHeight+'px')).observe(document.getElementById('header'));
+    let refreshNumber=0;
+    async function refreshReports(){
+      const refresh=++refreshNumber;
+      try{
+      const response=await fetch('/api/reports',{cache:'no-store'});
+      if(!response.ok)throw Error('dates');
+      const dates=await response.json();
+      if(refresh!==refreshNumber)return;
+      const removed=!!selectedDate && !dates.includes(selectedDate);
+      if(!selectedDate || removed)selectedDate=dates[0] || '';
+      document.getElementById('reports').replaceChildren();
+      for(const date of dates){
+        const section=document.createElement('section');section.className='card';
+        const title=document.createElement('h2');title.textContent=date;section.append(title);
+        for(const [type,label] of Object.entries(labels)){
+          const button=document.createElement('button');button.type='button';button.textContent=label;
+          button.addEventListener('click',()=>{selectedDate=date;show(type);});section.append(button);
+        }
+        const copyButton=document.createElement('button');copyButton.type='button';copyButton.textContent='複製當日彙總';
+        copyButton.addEventListener('click',()=>copySummary(date,copyButton));section.append(copyButton);
+        const feedback=document.createElement('p');feedback.className='copy-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');section.append(feedback);
+        document.getElementById('reports').append(section);
+      }
+      document.querySelectorAll('nav button[data-view]:not([data-view=home])').forEach(b=>b.disabled=!dates.length);
+      await show(removed?'home':view);
+      if(removed)message.textContent='原先查看的日期已移除，請從首頁選擇其他報表。';
+      }catch(error){if(refresh===refreshNumber)message.textContent='報表清單讀取失敗，請重新整理頁面。';}
+    }
+    // One persistent event connection: no timer, polling, or directory watching.
+    const reportEvents=new EventSource('/api/reports/events');
+    reportEvents.addEventListener('open',()=>refreshReports());
+    reportEvents.addEventListener('reports-updated',()=>refreshReports());
+  </script>
+</body>
+</html>
