@@ -1,0 +1,47 @@
+
+# 設定 TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# 建立下載資料夾
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+New-Item -ItemType Directory -Path $folder -Force | Out-Null
+
+# 從官方 NuGet 下載最新穩定版
+$url = "https://api.nuget.org/v3-flatcontainer/pdfpig/index.json"
+
+$versions = (Invoke-RestMethod -Uri $url).versions |
+    Where-Object { $_ -notmatch '-' }
+
+if (-not $versions) {
+    throw "找不到穩定版，請改為指定相容版本。"
+}
+
+$version = $versions[-1]
+$packageUrl = "https://api.nuget.org/v3-flatcontainer/pdfpig/$version/pdfpig.$version.nupkg"
+
+Invoke-WebRequest -Uri $packageUrl `
+    -OutFile "$folder\PdfPig.nupkg" `
+    -UseBasicParsing
+
+Write-Host "Downloaded PdfPig version: $version"
+Write-Host "Saved to: $folder"
+
+--------------------------------------------------------------
+
+確認下載是否成功
+Test-Path "$env:USERPROFILE\Desktop\PdfPigTest\PdfPig.nupkg"
+
+--------------------------------------------------------------
+
+
+接著可以解壓縮：
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+[System.IO.Compression.ZipFile]::ExtractToDirectory(
+    "$folder\PdfPig.nupkg",
+    "$folder\Extracted"
+)
+
+Get-ChildItem "$folder\Extracted\lib" -Recurse -Filter "*.dll"
