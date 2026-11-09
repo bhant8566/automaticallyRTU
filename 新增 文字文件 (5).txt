@@ -1,96 +1,1044 @@
-#requires -Version 5.1
-<#
-.SYNOPSIS
-  Extract positional text from PDFs and generate layout diagnostics, without assuming fixed column names/count.
-.EXAMPLE
-  .\Test-PdfLayout.ps1 -InputDirectory '.\InputPDF' -DllDirectory '.\Runtime_Test' -OutputDirectory '.\Diagnostics' -MaxPages 2
-.EXAMPLE
-  .\Test-PdfLayout.ps1 -SelectFiles -DllDirectory '.\Runtime_Test' -OutputDirectory '.\Diagnostics' -MaxPages 2
-.EXAMPLE
-  .\Test-PdfLayout.ps1 -WordsCsv '.\PdfWords.csv' -OutputDirectory '.\Diagnostics'
-.NOTES
-  PowerShell 5.1; uses existing PdfPig DLLs. This is a diagnostic tool, not a guaranteed table parser.
-#>
-[CmdletBinding(DefaultParameterSetName='Pdf')]
-param(
-    [Parameter(ParameterSetName='Pdf')][string]$InputDirectory = (Join-Path $PSScriptRoot 'InputPDF'),
-    [Parameter(ParameterSetName='Pdf')][switch]$SelectFiles,
-    [Parameter(ParameterSetName='Pdf')][string]$DllDirectory = (Join-Path $PSScriptRoot 'Runtime_Test'),
-    [Parameter(Mandatory=$true,ParameterSetName='Csv')][string]$WordsCsv,
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'Diagnostics'),
-    [ValidateRange(1,10000)][int]$MaxPages = 2,
-    [ValidateRange(0.1,20)][double]$YTolerance = 2.5,
-    [ValidateRange(0.1,30)][double]$XTolerance = 4.0
-)
-$ErrorActionPreference = 'Stop'
-$invariant = [System.Globalization.CultureInfo]::InvariantCulture
-New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-function Convert-Number($v) {
-    return [double]::Parse(([string]$v),[System.Globalization.NumberStyles]::Float,$invariant)
-}
-function Write-Utf8Csv($items,$path) {
-    @($items) | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
-}
-function Get-Lines($wordItems) {
-    $lines = New-Object 'System.Collections.Generic.List[object]'
-    $sorted = @($wordItems | Sort-Object @{Expression={-(Convert-Number $_.Y)}},@{Expression={Convert-Number $_.X}})
-    foreach ($w in $sorted) {
-        $y = Convert-Number $w.Y
-        $found = $null
-        foreach ($ln in $lines) {
-            if ([math]::Abs($ln.Y - $y) -le $YTolerance) { $found = $ln; break }
+我想問問一下 現在我有好幾萬筆的資料存放ˋ在pdf 裡面
+但是我現在唯一 能用的只有powershell 
+現在存放在pdf 裡面的是以表格方式儲存 每攔並沒有明顯分隔符
+我是要先將資料轉成pdf 再去操作 還是說我直接取值下來操作呢
+
+因為弄下來的資料 還需要整理 分類 再轉乘Html 報表
+
+那你覺得怎麼時做會比較好呢
+依照你的需求，我會建議採用 PowerShell + PDF 解析 + CSV + 資料整理 + HTML 報表 的架構。
+
+不過有一個關鍵：不要直接把 PDF 轉成 CSV 就認為完成了。你需要在中間建立一個「資料解析與標準化」的階段。
+
+因為你的 PDF 是表格形式，但每個 column 沒有明顯分隔符，這才是整個專案最需要處理的部分。
+
+一、我建議的完整架構
+原始 PDF 報表
+
+數萬筆資料，表格沒有明顯分隔符
+PowerShell + PDF 解析函式庫
+
+擷取文字、座標、頁碼與表格結構
+資料清理與標準化
+
+辨識 column、修正欄位、日期轉換、分類與去重
+CSV 歷史資料庫
+
+保留整理後的資料，供後續查詢與統計
+PowerShell 資料分析
+
+依日期、類別、設備等條件篩選與統計
+HTML + CSS + JavaScript
+
+互動式報表、圖表、搜尋、篩選與匯出
+這樣做最大的好處是：PDF 只需要成功解析一次，以後產生不同的 HTML 報表，不需要重新讀取所有 PDF。
+
+二、PDF 沒有分隔符，怎麼解析？
+這裡要先確認你的 PDF 屬於哪一種類型。
+
+MVP #15: How to copy tables from PDF to Excel, the sure way | Productivity Tips, MS Excel and Inspiration
+類型 A：文字可以選取
+
+最適合你的情況。即使沒有 ,、Tab 或 | 分隔符，仍有機會透過文字座標（X、Y）重建每個 column。
+
+Analyse af statens belastning af kommunernes administration
+類型 B：掃描影像 PDF
+
+必須先使用 OCR 辨識文字，再重建表格。PowerShell 可以呼叫 OCR 工具，但辨識品質與處理成本會比較高。
+
+假設你的 PDF 看起來是這樣：
+
+日期          設備       類別        數量
+2026/11/01    EQP001     Alarm       15
+2026/11/02    EQP002     Warning      8
+2026/11/03    EQP003     Alarm       22
+一般 PDF 文字擷取可能把資料變成：
+
+2026/11/01 EQP001 Alarm 15
+2026/11/02 EQP002 Warning 8
+如果直接使用 PowerShell 的 -split ' ' 來切割，當某個欄位本身包含空白，例如 High Temperature Alarm，就會造成 column 錯位。
+
+因此我更推薦使用 座標式解析：
+
+透過 Y 座標判斷哪些文字屬於同一個 row。
+
+透過 X 座標判斷文字屬於哪個 column。
+
+依照固定的表格結構重建資料。
+
+對重建結果進行欄位數量、資料型別及完整性驗證。
+
+在 PowerShell 5.1 環境，可以評估使用 .NET PDF 函式庫，例如 UglyToad.PdfPig，讀取 PDF 內文字及位置資訊。它不需要 VBA，但仍須確認公司是否允許載入第三方 DLL。
+
+三、為什麼我建議先存 CSV，而不是直接產生 HTML？
+比較項目
+
+直接 PDF → HTML
+
+PDF → CSV → HTML
+
+PDF 解析
+
+每次可能需要重做
+
+通常只需一次
+
+歷史資料保存
+
+不方便
+
+方便
+
+資料分類
+
+較難維護
+
+容易
+
+數萬筆統計
+
+依實作而定
+
+容易分批處理
+
+修改報表樣式
+
+可能與解析耦合
+
+與解析流程分離
+
+Excel 相容性
+
+低
+
+高
+
+後續擴充
+
+較困難
+
+較容易
+
+不過 CSV 並不是真正的資料庫。如果未來資料量增加到數百萬筆，而且需要頻繁查詢、修改、關聯多張表，我會建議進一步評估 SQLite。現階段數萬筆資料，用 CSV 配合 PowerShell 通常足夠。
+
+四、PowerShell 可以怎麼實作？
+假設已經成功從 PDF 解析並建立 History.csv：
+
+# 讀取歷史資料
+$data = Import-Csv ".\History.csv" -Encoding UTF8
+
+# 分類統計
+$summary = $data |
+    Group-Object Category |
+    ForEach-Object {
+        [PSCustomObject]@{
+            Category = $_.Name
+            Count    = $_.Count
+            Total    = (
+                $_.Group |
+                Measure-Object -Property Quantity -Sum
+            ).Sum
         }
-        if ($null -eq $found) {
-            $found = [pscustomobject]@{Y=$y;Words=(New-Object 'System.Collections.ArrayList')}
-            $lines.Add($found)
-        }
-        [void]$found.Words.Add($w)
     }
-    return @($lines | Sort-Object Y -Descending)
-}
-function Analyze-Report($reportName,$words) {
-    $safeName = $reportName -replace '[^a-zA-Z0-9_\-]','_'
-    $reportFolder = Join-Path $OutputDirectory $safeName
-    New-Item -ItemType Directory -Force -Path $reportFolder | Out-Null
-    $allWords = @($words)
-    if ($allWords.Count -eq 0) { Write-Warning "No words: $reportName"; return }
-    Write-Utf8Csv $allWords (Join-Path $reportFolder 'Words.csv')
-    $lineOut = New-Object 'System.Collections.Generic.List[object]'
-    $clusterOut = New-Object 'System.Collections.Generic.List[object]'
-    $footerOut = New-Object 'System.Collections.Generic.List[object]'
-    foreach ($pg in ($allWords | Group-Object Page | Sort-Object {[int]$_.Name})) {
-        $lines = @(Get-Lines $pg.Group)
-        $lineNo=0
-        foreach ($ln in $lines) {
-            $lineNo++
-            $ww = @($ln.Words | Sort-Object {Convert-Number $_.X})
-            $txt = ($ww | ForEach-Object {$_.Text}) -join ' '
-            $minX = ($ww | Measure-Object -Property X -Minimum).Minimum
-            $lineOut.Add([pscustomobject]@{Page=[int]$pg.Name;Line=$lineNo;Y=$ln.Y;WordCount=$ww.Count;MinX=$minX;Text=$txt})
-            if ($txt -match '(?i)\bpage\s*:\s*\d+\b') {
-                $footerOut.Add([pscustomobject]@{Page=[int]$pg.Name;Y=$ln.Y;Text=$txt})
-            }
-        }
-        # X-position clustering across words: candidates only; multi-word headings also create clusters.
-        $clusters = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($w in @($pg.Group | Sort-Object {Convert-Number $_.X})) {
-            $x=Convert-Number $w.X
-            $nearest=$null; $dist=[double]::PositiveInfinity
-            foreach ($c in $clusters) {
-                $d=[math]::Abs($c.Center-$x)
-                if ($d -le $XTolerance -and $d -lt $dist) {$nearest=$c;$dist=$d}
-            }
-            if ($null -eq $nearest) {
-                $nearest=[pscustomobject]@{Center=$x;Count=0;Sum=0.0;Samples=(New-Object 'System.Collections.ArrayList')}
-                $clusters.Add($nearest)
-            }
-            $nearest.Count++
-            $nearest.Sum += $x
-            $nearest.Center=$nearest.Sum/$nearest.Count
-            if ($nearest.Samples.Count -lt 5) {[void]$nearest.Samples.Add([string]$w.Text)}
-        }
-        foreach ($c in @($clusters | Sort-Object Count -Descending | Select-Object -First 40)) {
-            $clusterOut.Add([pscustomobject]@{Page=[int]$pg.Name;X=[math]::Round($c.Center,2);Occurrences=$c.Count;Examples=($c.Samples -join ' | ')})
+
+# 產生 HTML 表格
+$summary |
+    ConvertTo-Html -Fragment |
+    Out-File ".\Summary.html" -Encoding UTF8
+
+這只是最基本的報表生成方式。
+
+正式版本可以透過 PowerShell 產生 JSON，再由 HTML、CSS、JavaScript 建立搜尋、排序、分類選單、日期範圍篩選與互動式圖表。前端不需要使用 VBA，也不一定需要架設 Web Server。
+
+五、我的實作建議
+我會把整個專案分成三個獨立模組：
+
+PDF Parser：負責讀取 PDF，重建表格並驗證欄位，輸出標準化 CSV。
+
+Data Processor：負責歷史資料合併、分類、去重、統計及異常資料檢查。
+
+HTML Report Generator：負責讀取整理後的資料，輸出互動式 HTML 報表。
+
+這樣未來即使 PDF 格式變動，也只需要調整第一個模組，不必重寫整套報表系統。
+
+另外，對於數萬筆資料，我不建議每次打開 HTML 就直接渲染全部 row。應該先做彙總、條件篩選或分頁，避免瀏覽器操作變慢。
+
+六、我現在最想確認的一件事
+你的 PDF 目前是哪一種情況？
+
+
+文字可以選取、複製，但表格沒有分隔符
+
+整份 PDF 是圖片，文字無法選取
+
+有些頁面能選取，有些不能
+如果方便，你也可以直接上傳一份去除公司機密資料的 PDF 範例。我可以先判斷它的文字座標和表格結構是否適合自動解析，再決定 PowerShell 5.1 應該採用哪種技術，避免一開始就選錯方向。
+
+我的 PDF 文字可以選取複製，但表格沒有分隔符。請設計 PowerShell 5.1 座標式表格解析方案。
+PowerShell 5.1：PDF 座標式表格解析方案
+你的 PDF 已經確認是文字可以選取，但表格沒有明顯分隔符。這種情況我建議使用：
+
+PowerShell 5.1 + PdfPig (.NET PDF 函式庫) + 座標解析 + CSV + HTML
+
+整個方案不需要 VBA、Python，也不需要安裝完整的 Visual Studio。
+
+但有一個前提：公司電腦必須允許 PowerShell 載入相容的第三方 .NET DLL。如果資安政策禁止載入 DLL，就需要改採其他方案。
+
+一、核心原理：使用文字座標還原表格
+PDF 與 Excel 不同。PDF 主要描述文字應該顯示在頁面上的哪個位置，不一定保存 row、column 等表格結構。
+
+例如原始 PDF：
+
+PDF 頁面示意
+
+日期
+
+設備
+
+異常類別
+
+數量
+
+2026/11/01	EQP001	Alarm	15
+2026/11/02	EQP002	Warning	8
+2026/11/03	EQP003	Alarm	22
+我們可以把 PDF 中的文字轉換成以下資訊：
+
+Text
+
+X
+
+Y
+
+2026/11/01
+
+50
+
+700
+
+EQP001
+
+160
+
+700
+
+Alarm
+
+280
+
+700
+
+15
+
+430
+
+700
+
+2026/11/02
+
+50
+
+680
+
+EQP002
+
+160
+
+680
+
+以上座標為示意數值，不是實際 PDF 的解析結果。
+因此我們可以設計兩個規則：
+
+Y 座標相近： 判定為同一個 row。
+
+X 座標落在指定區間： 判定為某個 column。
+
+PDF 座標分區示意
+
+
+顏色區塊代表各 column 的 X 座標範圍；水平虛線用來區分 row。
+這個方法不依賴空白字元，因此欄位內容即使包含空白，也比較不容易造成錯位。
+
+不過正式解析還需要處理文字跨行、表格跨頁、重複頁首，以及部分 PDF 文字順序與視覺順序不同的情況。
+
+二、程式架構
+建議把資料處理拆成四個階段：
+
+階段
+
+PowerShell 工作
+
+輸出
+
+1. Extract
+
+讀取 PDF 每個文字物件及座標
+
+RawWords.csv
+
+2. Parse
+
+依 X/Y 座標重建 row、column
+
+Parsed.csv
+
+3. Validate
+
+檢查欄位、日期、重複與異常
+
+Clean.csv、Errors.csv
+
+4. Report
+
+分類統計並產生 HTML
+
+Report.html
+
+最重要的是保留 RawWords.csv。 當某筆資料解析錯誤時，你可以直接回查它原本位於哪個 PDF、哪一頁，以及對應的座標，而不必重新解析整份文件。
+
+三、先建立 PowerShell 解析程式
+我建議第一版先完成 PDF → CSV，確認資料沒有錯位後，再進行分類與 HTML 報表。
+
+1. 專案目錄
+PDFReportSystem/
+│
+├── InputPDF/
+│   ├── Report_001.pdf
+│   └── Report_002.pdf
+│
+├── Lib/
+│   └── PdfPig.dll
+│
+├── Output/
+│   ├── RawWords.csv
+│   ├── Parsed.csv
+│   └── Errors.csv
+│
+├── Extract-Pdf.ps1
+├── Process-Data.ps1
+└── Generate-Report.ps1
+這裡的 PdfPig.dll 代表 PdfPig 主程式集。實際部署可能還需要相依 DLL，必須依下載的版本一併放入 Lib。
+
+版本注意： PowerShell 5.1 使用 .NET Framework，不是所有新版 PdfPig 都一定相容。應選擇明確支援你電腦 .NET Framework 版本的 PdfPig 套件及相依套件，不能只下載最新 DLL 就假設能運作。
+
+2. 第一步：讀取 PDF 文字與座標
+以下程式用來檢查 PdfPig 是否能成功取得文字與座標。
+
+
+$ErrorActionPreference = 'Stop'
+
+# PDF 與 DLL 路徑
+$PdfPath = "C:\PDFReportSystem\InputPDF\Report_001.pdf"
+$DllPath = "C:\PDFReportSystem\Lib\PdfPig.dll"
+$Output  = "C:\PDFReportSystem\Output\RawWords.csv"
+
+# 載入 PDF 函式庫
+Add-Type -Path $DllPath
+
+# 開啟 PDF
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($PdfPath)
+
+$results = New-Object 'System.Collections.Generic.List[object]'
+
+try {
+    foreach ($page in $pdf.GetPages()) {
+
+        # GetWords() 取得文字與 bounding box
+        foreach ($word in $page.GetWords()) {
+
+            $box = $word.BoundingBox
+
+            $results.Add([PSCustomObject]@{
+                Page   = $page.Number
+                Text   = $word.Text
+                X      = $box.Left
+                Y      = $box.Bottom
+                Right  = $box.Right
+                Top    = $box.Top
+            })
         }
     }
+}
+finally {
+    $pdf.Dispose()
+}
+
+# 匯出座標資訊
+$results |
+    Export-Csv -Path $Output `
+               -NoTypeInformation `
+               -Encoding UTF8
+
+Write-Host "Extraction completed: $($results.Count) words"
+
+這份程式有三個重點：
+
+GetPages()：逐頁讀取 PDF，避免把整份文件的頁面物件全部保留在記憶體。
+
+GetWords()：取得文字及其 Bounding Box，包含左、右、上、下座標。
+
+Export-Csv：把擷取結果存成 CSV，供後續解析。
+
+這是第一階段的基礎程式，尚未處理所有特殊 PDF 格式。實際能否執行，取決於安裝的 PdfPig 版本及相依 DLL 是否正確。
+
+3. 第二步：依座標還原表格
+假設你檢查 RawWords.csv 後，確認四個 column 的 X 座標範圍如下：
+
+Column
+
+X 範圍
+
+Date
+
+40–140
+
+Equipment
+
+140–260
+
+Category
+
+260–400
+
+Quantity
+
+400–500
+
+可以先用固定座標分區，實作第一版解析器。
+
+
+$ErrorActionPreference = 'Stop'
+
+$root = "C:\PDFReportSystem\Output"
+
+$words = Import-Csv "$root\RawWords.csv"
+
+# 同一 row 的 Y 座標容許誤差（PDF points）
+$YTolerance = 3.0
+
+# Column 的 X 邊界
+$columns = @(
+    @{ Name = "Date";      Min = 40;  Max = 140 }
+    @{ Name = "Equipment"; Min = 140; Max = 260 }
+    @{ Name = "Category";  Min = 260; Max = 400 }
+    @{ Name = "Quantity";  Min = 400; Max = 500 }
+)
+
+$records = New-Object 'System.Collections.Generic.List[object]'
+
+# 不同頁面必須分開處理
+$pages = $words | Group-Object Page
+
+foreach ($page in $pages) {
+
+    # 從上到下、從左到右排列
+    $sorted = $page.Group |
+        Sort-Object `
+            @{Expression = {[double]$_.Y}; Descending = $true},
+            @{Expression = {[double]$_.X}; Ascending = $true}
+
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $currentRow = New-Object 'System.Collections.Generic.List[object]'
+    $referenceY = $null
+
+    foreach ($word in $sorted) {
+        $y = [double]$word.Y
+
+        if ($null -ne $referenceY -and
+            [math]::Abs($y - $referenceY) -gt $YTolerance) {
+
+            $rows.Add($currentRow.ToArray())
+            $currentRow = New-Object 'System.Collections.Generic.List[object]'
+        }
+
+        $currentRow.Add($word)
+        $referenceY = $y
+    }
+
+    if ($currentRow.Count -gt 0) {
+        $rows.Add($currentRow.ToArray())
+    }
+
+    foreach ($row in $rows) {
+
+        $record = [ordered]@{
+            Page = $page.Name
+        }
+
+        foreach ($column in $columns) {
+
+            $matched = $row |
+                Where-Object {
+                    $x = [double]$_.X
+                    $x -ge $column.Min -and
+                    $x -lt $column.Max
+                } |
+                Sort-Object {[double]$_.X}
+
+            $record[$column.Name] = (
+                ($matched | ForEach-Object { $_.Text }) -join " "
+            ).Trim()
+        }
+
+        $records.Add([PSCustomObject]$record)
+    }
+}
+
+$records |
+    Export-Csv "$root\Parsed.csv" `
+        -NoTypeInformation -Encoding UTF8
+
+Write-Host "Parsed rows: $($records.Count)"
+
+這個版本適合固定欄位、單行資料、沒有跨欄或合併儲存格的 PDF 報表。
+
+它目前仍有幾個限制：
+
+Y 座標誤差是固定值，可能需要依字體大小調整。
+
+多行文字可能被誤判成不同 row。
+
+每頁標題與表頭也可能被當成資料。
+
+文字橫跨 column 邊界時，可能被歸到錯誤欄位。
+
+它是基礎解析器，還沒有完整的異常資料驗證。
+
+因此不建議直接把這份初版程式用在正式報表，而是先拿一份 PDF 測試，再調整座標及 row 重建規則。
+
+四、數萬筆資料，如何確保解析正確？
+這部分比單純讀取 PDF 更重要。
+
+假設原始 PDF 有 30,000 筆資料，但解析後只有 29,850 筆，你必須知道少掉的 150 筆發生在哪裡。
+
+我建議建立以下驗證機制。
+
+驗證項目
+
+檢查方式
+
+日期格式
+
+TryParseExact()
+
+設備編號
+
+Regex 檢查
+
+數量
+
+TryParse()
+
+必填欄位
+
+不允許空白
+
+重複資料
+
+依業務唯一鍵檢查
+
+每頁資料量
+
+比對預期 row 數
+
+解析失敗
+
+寫入 Errors.csv
+
+例如數量欄位必須是整數：
+
+$quantity = 0
+
+$valid = [int]::TryParse(
+    $record.Quantity,
+    [ref]$quantity
+)
+
+if (-not $valid) {
+    Write-Warning "Invalid Quantity on page $($record.Page)"
+}
+
+正式版本應該把解析失敗的資料獨立保存，而不是直接忽略。
+
+此外，原始 PDF 應該保留不動，方便未來重新解析及追查問題。
+
+五、效能方面，我會這樣設計
+你的資料有數萬筆，對 PowerShell 5.1 來說不是特別大的規模。
+
+真正影響效能的通常不是 CSV 的 row 數，而是 PDF 的文字物件數量、解析演算法，以及是否反覆載入相同資料。
+
+我建議：
+
+PDF 逐頁解析，避免長時間保留整份文件的物件。
+
+每個 PDF 解析完成後就輸出結果，不必將所有 PDF 的文字同時放進記憶體。
+
+已處理的 PDF 記錄檔案雜湊值，避免重複解析。
+
+資料整理完成後才寫入歷史 CSV，避免污染正式資料。
+
+HTML 以統計結果為主，明細採分頁或按條件載入。
+
+如果未來每天持續新增 PDF，還可以用 Windows 工作排程器自動執行：
+
+每日 PDF 增量處理
+
+自動化
+掃描 InputPDF
+
+找出新增或變更的 PDF
+解析並驗證
+
+只處理需要更新的文件
+更新歷史資料
+
+去重、分類、統計
+重新產生 HTML 報表
+
+呈現最新統計結果
+六、下一步建議
+現在先不要急著製作 HTML。我建議先驗證最關鍵的技術：PdfPig 能否正確取得你的 PDF 文字與 X/Y 座標。
+
+你可以上傳一份去識別化的 PDF，最好有 2–3 頁、包含正常資料與較長的欄位文字。
+
+我就可以根據實際的表格格式，幫你把上述通用版本改成適合你報表的 PowerShell 5.1 解析器，包括自動辨識 column、處理跨頁資料、檢查錯位，以及批次輸出 CSV。
+
+這樣做會比現在直接寫死座標，然後拿數萬筆資料反覆測試可靠得多。
+
+那你先給我pdf pig 的下載指令 我看公司能不能用
+你目前使用的是 Windows PowerShell 5.1，建議先測試公司電腦能不能連線到 NuGet，以及能不能下載 PdfPig 套件。
+
+先在 PowerShell 執行：
+
+# 檢查 PowerShell 版本
+$PSVersionTable.PSVersion
+
+# 檢查是否能連線到 NuGet
+Test-NetConnection api.nuget.org -Port 443
+
+如果 TcpTestSucceeded : True，代表 TCP 443 連線測試成功，但不保證公司允許實際下載。
+
+下載 PdfPig 的 PowerShell 指令
+建議先使用官方 NuGet 套件 PdfPig，不要使用名稱相似的第三方套件。
+
+uglytoad.github.io
++1
+
+在 PowerShell 5.1 執行：
+
+
+# 設定 TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# 建立下載資料夾
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+New-Item -ItemType Directory -Path $folder -Force | Out-Null
+
+# 從官方 NuGet 下載最新穩定版
+$url = "https://api.nuget.org/v3-flatcontainer/pdfpig/index.json"
+
+$versions = (Invoke-RestMethod -Uri $url).versions |
+    Where-Object { $_ -notmatch '-' }
+
+if (-not $versions) {
+    throw "找不到穩定版，請改為指定相容版本。"
+}
+
+$version = $versions[-1]
+$packageUrl = "https://api.nuget.org/v3-flatcontainer/pdfpig/$version/pdfpig.$version.nupkg"
+
+Invoke-WebRequest -Uri $packageUrl `
+    -OutFile "$folder\PdfPig.nupkg" `
+    -UseBasicParsing
+
+Write-Host "Downloaded PdfPig version: $version"
+Write-Host "Saved to: $folder"
+
+這段會下載 NuGet 套件，但不會自動安裝或執行 DLL，適合先測試公司的下載權限。
+
+確認下載是否成功
+Test-Path "$env:USERPROFILE\Desktop\PdfPigTest\PdfPig.nupkg"
+
+如果顯示 True，表示套件檔案已存在。
+
+接著可以解壓縮：
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+[System.IO.Compression.ZipFile]::ExtractToDirectory(
+    "$folder\PdfPig.nupkg",
+    "$folder\Extracted"
+)
+
+Get-ChildItem "$folder\Extracted\lib" -Recurse -Filter "*.dll"
+
+注意：下載成功不代表能在 PowerShell 5.1 載入。還必須檢查套件的 .NET Framework 相容性及相依 DLL。
+
+你也可以從官方網站手動下載：PdfPig 官方 NuGet 頁面。
+
+你先執行下載指令即可。 如果成功，把 Get-ChildItem 列出的 DLL 路徑貼給我，我再幫你寫下一階段的 Add-Type 載入測試，以及 PDF 文字座標擷取程式。
+
+目前看起來都可以順利完成
+既然 PdfPig 已經能成功下載及解壓縮，下一步就是確認 PowerShell 5.1 能否載入 PdfPig DLL，並讀取 PDF 的文字與 X/Y 座標。
+
+下載成功不代表 DLL 一定能載入，因此先進行相容性測試。
+
+第一步：檢查 DLL
+執行以下 PowerShell：
+
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+# 查看套件支援哪些 .NET 版本
+Get-ChildItem "$folder\Extracted\lib" -Directory |
+    Select-Object Name, FullName
+
+# 列出所有 DLL
+Get-ChildItem "$folder\Extracted\lib" -Recurse -Filter "*.dll" |
+    Select-Object FullName
+
+如果出現 netstandard2.0，代表它有可能與 PowerShell 5.1 相容，但仍須確認 .NET Framework 版本及套件相依性。
+
+第二步：測試載入 PdfPig
+先找出 DLL：
+
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+$dll = Get-ChildItem "$folder\Extracted\lib" `
+    -Recurse -Filter "PdfPig.dll" |
+    Select-Object -First 1
+
+if (-not $dll) {
+    Write-Host "找不到 PdfPig.dll"
+    return
+}
+
+try {
+    Add-Type -Path $dll.FullName -ErrorAction Stop
+    Write-Host "PdfPig DLL 載入成功" -ForegroundColor Green
+}
+catch {
+    Write-Host "DLL 載入失敗" -ForegroundColor Red
+    Write-Host $_.Exception.ToString()
+}
+
+這只是基本載入測試。即使顯示成功，實際開啟 PDF 時仍可能因缺少相依 DLL 而失敗。
+
+第三步：確認 PDF 文字與座標
+當 DLL 及相依套件都載入成功後，可以使用以下程式：
+
+$pdfPath = "C:\Temp\Report.pdf"  # 修改為實際 PDF 路徑
+
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
+
+try {
+    $page = $pdf.GetPage(1)
+
+    $page.GetWords() |
+        Select-Object -First 20 |
+        ForEach-Object {
+            [PSCustomObject]@{
+                Text = $_.Text
+                X    = $_.BoundingBox.Left
+                Y    = $_.BoundingBox.Bottom
+            }
+        } |
+        Format-Table -AutoSize
+}
+finally {
+    $pdf.Dispose()
+}
+
+成功的話，會看到類似：
+
+Text          X       Y
+----          ---     ---
+2026/11/01    50.2    700.5
+EQP001        160.4   700.5
+Alarm         280.1   700.5
+15            430.3   700.5
+這些是示意座標。
+
+你先執行第一步，把 lib 底下的資料夾名稱貼給我。
+
+我會根據你實際下載的 PdfPig 版本，確認應該載入哪個 DLL，以及是否還需要安裝相依套件。這樣比較不容易在公司環境遇到版本不相容的問題。
+
+net462 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462
+net471 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471
+net6.0 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0
+net8.0 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0
+net9.0 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0
+netstandard2.0 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0
+netstandard2.1 C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net462\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net471\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net6.0\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net8.0\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\net9.0\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.0\UglyToad.PdfPig.Tokens.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.Core.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.Fonts.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.Package.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A19407\Desktop\PdfPigTest\Extracted\lib\netstandard2.1\UglyToad.PdfPig.Tokens.dll
+…
+從你提供的結果來看，PdfPig 已經成功下載並解壓縮，而且有提供適合 Windows PowerShell 5.1 的 .NET Framework 版本。
+
+你目前有兩個優先選擇：
+
+版本
+
+適用環境
+
+建議
+
+net462
+
+.NET Framework 4.6.2 以上
+
+相容性較廣
+
+net471
+
+.NET Framework 4.7.1 以上
+
+優先測試
+
+net6.0 以上
+
+現代 .NET Runtime
+
+不適合直接載入 PowerShell 5.1
+
+netstandard2.0
+
+支援該標準的 Runtime
+
+有相容條件，不是首選
+
+我建議你先測試 net471，但必須確認公司電腦的 .NET Framework 版本。
+
+第一步：檢查 .NET Framework 版本
+在 PowerShell 執行：
+
+Get-ItemProperty `
+    'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' |
+    Select-Object Release, Version
+
+如果 Release 大於或等於 461308，通常代表已安裝 .NET Framework 4.7.1 或更新版本。
+
+第二步：載入 PdfPig DLL
+你的套件不是只有一個 DLL，而是拆分成多個組件，因此先測試載入整組 net471 DLL。
+
+
+$ErrorActionPreference = "Stop"
+
+$libPath = "$env:USERPROFILE\Desktop\PdfPigTest\Extracted\lib\net471"
+
+# 檢查 DLL 是否存在
+$dllFiles = Get-ChildItem $libPath -Filter "*.dll"
+
+Write-Host "Found $($dllFiles.Count) DLL files"
+
+# 先載入 Core 等底層組件，再載入主組件
+$loadOrder = @(
+    "UglyToad.PdfPig.Core.dll",
+    "UglyToad.PdfPig.Tokens.dll",
+    "UglyToad.PdfPig.Tokenization.dll",
+    "UglyToad.PdfPig.Fonts.dll",
+    "UglyToad.PdfPig.DocumentLayoutAnalysis.dll",
+    "UglyToad.PdfPig.Package.dll",
+    "UglyToad.PdfPig.dll"
+)
+
+foreach ($dll in $loadOrder) {
+    $path = Join-Path $libPath $dll
+
+    try {
+        Add-Type -Path $path -ErrorAction Stop
+        Write-Host "Loaded: $dll" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Failed: $dll" -ForegroundColor Red
+        Write-Host $_.Exception.ToString()
+        break
+    }
+}
+
+這裡的載入順序是初步測試用，並非已驗證的完整相依順序。如果某個 DLL 依賴其他 NuGet 套件，仍然可能出現載入失敗。
+
+第三步：測試 PdfPig 是否可以正常使用
+如果第二步全部成功，再執行：
+
+[UglyToad.PdfPig.PdfDocument] |
+    Select-Object FullName
+
+正常情況應該會顯示類似：
+
+FullName
+--------
+UglyToad.PdfPig.PdfDocument
+這代表 PowerShell 已經可以辨識 PdfPig 的主要類別，但還不代表實際 PDF 解析一定成功。
+
+接下來才是使用 PdfDocument.Open() 讀取 PDF，確認文字座標能否擷取。
+
+你現在先執行第一步與第二步，然後告訴我兩件事：
+
+.NET Framework 的 Release 數值。
+
+七個 DLL 是否全部顯示 Loaded，還是有出現 Failed。
+
+如果全部成功，我們下一步就可以直接進行 PDF → X/Y 座標 → CSV 的實際測試。
+
+    Write-Utf8Csv $lineOut (Join-Path $reportFolder 'VisualLines.csv')
+    Write-Utf8Csv $clusterOut (Join-Path $reportFolder 'XCandidates.csv')
+    Write-Utf8Csv $footerOut (Join-Path $reportFolder 'Footers.csv')
+    $summary = [ordered]@{
+        Report=$reportName; PagesAnalyzed=@($allWords | Select-Object -ExpandProperty Page -Unique).Count
+        Words=$allWords.Count; VisualLines=$lineOut.Count
+        FooterMatches=$footerOut.Count
+        Notes=@('XCandidates are frequent word start positions, NOT confirmed columns.',
+                'VisualLines preserves line-level text for comparing different report layouts.',
+                'No row/column inference is asserted in this diagnostic version.')
+    }
+    $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $reportFolder 'Summary.json') -Encoding UTF8
+    Write-Host "[$reportName] Words=$($allWords.Count), Lines=$($lineOut.Count), Footers=$($footerOut.Count)" -ForegroundColor Green
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Csv') {
+    if (-not (Test-Path -LiteralPath $WordsCsv -PathType Leaf)) {throw "CSV not found: $WordsCsv"}
+    $raw=@(Import-Csv -LiteralPath $WordsCsv)
+    if ($raw.Count -eq 0) {throw 'CSV is empty'}
+    foreach ($required in @('Page','Text','X','Y')) {
+        if (-not ($raw[0].PSObject.Properties.Name -contains $required)) {throw "CSV missing column: $required"}
+    }
+    Analyze-Report ([IO.Path]::GetFileNameWithoutExtension($WordsCsv)) $raw
+    return
+}
+
+# Allow selecting PDFs from anywhere, without copying them to InputPDF.
+if ($SelectFiles) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'Select PDF reports (Ctrl/Shift for multiple files)'
+    $dialog.Filter = 'PDF files (*.pdf)|*.pdf'
+    $dialog.Multiselect = $true
+    $dialog.CheckFileExists = $true
+    $dialog.RestoreDirectory = $true
+    try {
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+            Write-Host 'No files selected; cancelled.' -ForegroundColor Yellow
+            return
+        }
+        $selectedPdfPaths = @($dialog.FileNames)
+    } finally { $dialog.Dispose() }
+} else {
+    if (-not (Test-Path -LiteralPath $InputDirectory -PathType Container)) {
+        throw "PDF input folder not found: $InputDirectory (or use -SelectFiles)"
+    }
+    $selectedPdfPaths = @(Get-ChildItem -LiteralPath $InputDirectory -Filter '*.pdf' -File | Sort-Object Name | Select-Object -ExpandProperty FullName)
+}
+if ($selectedPdfPaths.Count -eq 0) {throw 'No PDF files selected or found.'}
+if (-not (Test-Path -LiteralPath $DllDirectory -PathType Container)) {throw "DLL folder not found: $DllDirectory"}
+$files = @(Get-ChildItem -LiteralPath $DllDirectory -Filter '*.dll' -File)
+if ($files.Count -eq 0) {throw "No DLLs in $DllDirectory"}
+# Register resolver for dependencies co-located with PdfPig (compatible with PS 5.1 / .NET Framework).
+$script:PdfPigDllDirectory = (Resolve-Path -LiteralPath $DllDirectory).Path
+$resolveHandler = [System.ResolveEventHandler]{
+    param($sender,$args)
+    $simpleName = (New-Object System.Reflection.AssemblyName($args.Name)).Name
+    $candidate = Join-Path $script:PdfPigDllDirectory ($simpleName + '.dll')
+    if (Test-Path -LiteralPath $candidate) {
+        return [System.Reflection.Assembly]::LoadFrom($candidate)
+    }
+    return $null
+}
+[AppDomain]::CurrentDomain.add_AssemblyResolve($resolveHandler)
+try {
+    # Load dependencies first, then PdfPig assemblies. This avoids common PS 5.1 resolution errors.
+    $loadOrder = @('System.Numerics.Vectors.dll','System.Runtime.CompilerServices.Unsafe.dll',
+        'System.Buffers.dll','System.Memory.dll','Microsoft.Bcl.HashCode.dll')
+    foreach ($dll in $loadOrder) {
+        $path = Join-Path $script:PdfPigDllDirectory $dll
+        if (Test-Path -LiteralPath $path) {[void][System.Reflection.Assembly]::LoadFrom($path)}
+    }
+    foreach ($f in @($files | Where-Object {$_.Name -like 'UglyToad.PdfPig*.dll'} | Sort-Object Name)) {
+        [void][System.Reflection.Assembly]::LoadFrom($f.FullName)
+    }
+    if (-not ('UglyToad.PdfPig.PdfDocument' -as [type])) {throw 'PdfPig type not found. Check DLL directory.'}
+    $pdfs=@($selectedPdfPaths | ForEach-Object {Get-Item -LiteralPath $_})
+    foreach ($pdfFile in $pdfs) {
+        Write-Host "Reading $($pdfFile.Name)" -ForegroundColor Cyan
+        $wordList = New-Object 'System.Collections.Generic.List[object]'
+        $doc=$null
+        try {
+            $doc=[UglyToad.PdfPig.PdfDocument]::Open($pdfFile.FullName)
+            $count=0
+            foreach ($page in $doc.GetPages()) {
+                $count++
+                if ($count -gt $MaxPages) {break}
+                foreach ($w in $page.GetWords()) {
+                    $wordList.Add([pscustomobject]@{
+                        Page=$page.Number;Text=$w.Text
+                        X=[math]::Round($w.BoundingBox.Left,2)
+                        Y=[math]::Round($w.BoundingBox.Bottom,2)
+                        Width=[math]::Round(($w.BoundingBox.Right-$w.BoundingBox.Left),2)
+                        Height=[math]::Round(($w.BoundingBox.Top-$w.BoundingBox.Bottom),2)
+                    })
+                }
+            }
+            Analyze-Report $pdfFile.BaseName $wordList
+        } catch {
+            Write-Warning "Failed $($pdfFile.Name): $($_.Exception.Message)"
+            [pscustomobject]@{File=$pdfFile.Name;Error=$_.Exception.ToString()} |
+                ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDirectory ($pdfFile.BaseName + '_Error.json')) -Encoding UTF8
+        } finally {if ($null -ne $doc) {$doc.Dispose()}}
+    }
+} finally {
+    [AppDomain]::CurrentDomain.remove_AssemblyResolve($resolveHandler)
+}
+
+
+
+
+
