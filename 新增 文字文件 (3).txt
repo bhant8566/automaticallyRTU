@@ -1,162 +1,229 @@
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $root = Join-Path $env:USERPROFILE 'Desktop\PdfPigTest'
-$tools = Join-Path $root 'Tools'
-$packages = Join-Path $root 'NuGetPackages'
-$runtime = Join-Path $root 'Runtime_NuGet'
-$nuget = Join-Path $tools 'nuget.exe'
-$nuspec = Join-Path $root 'Extracted\PdfPig.nuspec'
+$source = Join-Path $root 'Extracted\lib\net471'
+$dependencies = Join-Path $root 'Dependencies'
+$runtime = Join-Path $root 'Runtime_Test'
 
-New-Item -ItemType Directory -Force -Path $tools, $packages | Out-Null
+New-Item -ItemType Directory -Path $runtime -Force | Out-Null
 
-# 1. Read exact PdfPig package version
-if (-not (Test-Path $nuspec)) {
-    throw "Cannot find PdfPig.nuspec: $nuspec"
+# Copy PdfPig assemblies
+if (-not (Test-Path $source)) {
+    throw "PdfPig net471 directory not found: $source"
 }
 
-[xml]$xml = Get-Content $nuspec -Raw -Encoding UTF8
-$packageId = [string]$xml.package.metadata.id
-$packageVersion = [string]$xml.package.metadata.version
+Copy-Item (Join-Path $source '*.dll') -Destination $runtime -Force
 
-if ($packageId -ne 'PdfPig' -or -not $packageVersion) {
-    throw "Unexpected PdfPig package metadata."
-}
-
-Write-Host "Package: $packageId"
-Write-Host "Version: $packageVersion"
-
-# 2. Download official NuGet CLI
-if (-not (Test-Path $nuget)) {
-    $url = 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe'
-
-    Write-Host 'Downloading NuGet CLI...' -ForegroundColor Cyan
-
-    Invoke-WebRequest `
-        -Uri $url `
-        -OutFile $nuget `
-        -UseBasicParsing
-}
-
-# 3. Verify NuGet can execute
-& $nuget help | Select-Object -First 5
-
-if ($LASTEXITCODE -ne 0) {
-    throw 'NuGet CLI failed to start.'
-}
-
-# 4. Install PdfPig and transitive dependencies
-Write-Host 'Restoring PdfPig dependencies...' -ForegroundColor Cyan
-
-& $nuget install $packageId `
-    -Version $packageVersion `
-    -Framework net48 `
-    -OutputDirectory $packages `
-    -Source 'https://api.nuget.org/v3/index.json' `
-    -DependencyVersion Lowest `
-    -NonInteractive `
-    -Verbosity normal
-
-if ($LASTEXITCODE -ne 0) {
-    throw "NuGet installation failed. Exit code: $LASTEXITCODE"
-}
-
-# 5. Select .NET Framework assets
-function Get-FrameworkRank {
-    param([string]$Name)
-
-    $n = $Name.ToLowerInvariant()
-
-    if ($n -match '^net(4)(\d)(\d?)$') {
-        $rank = 400 + ([int]$matches[2] * 10)
-
-        if ($matches[3]) {
-            $rank += [int]$matches[3]
-        }
-
-        if ($rank -le 480) {
-            return $rank
-        }
+# Required dependencies and assembly versions
+$required = @(
+    [PSCustomObject]@{
+        Name = 'System.Memory'
+        Version = '4.0.2.0'
+    },
+    [PSCustomObject]@{
+        Name = 'Microsoft.Bcl.HashCode'
+        Version = '6.0.0.0'
+    },
+    [PSCustomObject]@{
+        Name = 'System.Runtime.CompilerServices.Unsafe'
+        Version = '6.0.1.0'
+    },
+    [PSCustomObject]@{
+        Name = 'System.Buffers'
+        Version = '4.0.4.0'
     }
+)
 
-    return -1
-}
+$missing = @()
 
-# 6. Prepare clean runtime directory
-if (Test-Path $runtime) {
-    Remove-Item $runtime -Recurse -Force
-}
+foreach ($item in $required) {
 
-New-Item -ItemType Directory -Path $runtime | Out-Null
+    $fileName = "$($item.Name).dll"
 
-$dllMap = @{}
-$manifest = @()
+    $candidates = @(
+        Get-ChildItem $dependencies -Recurse -Filter $fileName -File |
+            Where-Object { $_.FullName -match '\\lib\\' }
+    )
 
-foreach ($folder in (Get-ChildItem $packages -Directory)) {
+    $matched = $null
 
-    $lib = Join-Path $folder.FullName 'lib'
+    foreach ($file in $candidates) {
 
-    if (-not (Test-Path $lib)) {
-        Write-Warning "No lib folder: $($folder.Name)"
-        continue
-    }
+        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
+            $file.FullName
+        )
 
-    $framework = Get-ChildItem $lib -Directory |
-        Where-Object {
-            (Get-FrameworkRank $_.Name) -ge 0
-        } |
-        Sort-Object {
-            Get-FrameworkRank $_.Name
-        } -Descending |
-        Select-Object -First 1
-
-    if (-not $framework) {
-        throw "No compatible .NET Framework DLL: $($folder.Name)"
-    }
-
-    $dlls = @(Get-ChildItem $framework.FullName -Filter '*.dll')
-
-    foreach ($dll in $dlls) {
-
-        $key = $dll.Name.ToLowerInvariant()
-        $identity = [Reflection.AssemblyName]::GetAssemblyName($dll.FullName)
-
-        if ($dllMap.ContainsKey($key)) {
-            $existing = [Reflection.AssemblyName]::GetAssemblyName(
-                $dllMap[$key]
-            )
-
-            if ($existing.FullName -ne $identity.FullName) {
-                throw "DLL version conflict: $($dll.Name)"
+        if ($assembly.Version.ToString() -eq $item.Version) {
+            # Prefer .NET Framework assets
+            if ($file.FullName -match '\\lib\\net4\d+\\') {
+                $matched = $file
+                break
             }
 
-            continue
+            if (-not $matched) {
+                $matched = $file
+            }
         }
-
-        $dllMap[$key] = $dll.FullName
     }
 
-    $manifest += [PSCustomObject]@{
-        Package = $folder.Name
-        Framework = $framework.Name
-        DllCount = $dlls.Count
+    if ($matched) {
+
+        Copy-Item $matched.FullName -Destination $runtime -Force
+
+        Write-Host "FOUND: $($item.Name) $($item.Version)" `
+            -ForegroundColor Green
+
+    } else {
+
+        Write-Host "MISSING: $($item.Name) $($item.Version)" `
+            -ForegroundColor Yellow
+
+        $missing += $item
     }
 }
-
-# 7. Copy DLLs into clean Runtime
-foreach ($key in $dllMap.Keys) {
-    Copy-Item $dllMap[$key] -Destination $runtime -Force
-}
-
-$manifest |
-    Export-Csv (Join-Path $root 'NuGetManifest.csv') `
-        -NoTypeInformation -Encoding UTF8
 
 Write-Host ''
-Write-Host 'NuGet installation completed.' -ForegroundColor Green
-Write-Host "Runtime: $runtime"
-Write-Host "DLL count: $($dllMap.Count)"
+Write-Host "Runtime directory: $runtime"
+Write-Host "Missing dependencies: $($missing.Count)"
 
 Get-ChildItem $runtime -Filter '*.dll' |
-    Select-Object Name |
+    ForEach-Object {
+
+        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
+            $_.FullName
+        )
+
+        [PSCustomObject]@{
+            Name = $assembly.Name
+            Version = $assembly.Version
+        }
+    } |
     Format-Table -AutoSize
+
+---------------------------------------------------
+
+
+$ErrorActionPreference = 'Stop'
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$root = "$env:USERPROFILE\Desktop\PdfPigTest"
+$depRoot = Join-Path $root 'Dependencies'
+
+$name = 'system.buffers'
+$version = '4.6.0'
+
+$url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
+
+$packagePath = Join-Path $depRoot "$name.$version.nupkg"
+$extractPath = Join-Path $depRoot "$name.$version"
+
+New-Item -ItemType Directory -Path $depRoot -Force | Out-Null
+
+Invoke-WebRequest -Uri $url `
+    -OutFile $packagePath `
+    -UseBasicParsing
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+if (-not (Test-Path $extractPath)) {
+    [IO.Compression.ZipFile]::ExtractToDirectory(
+        $packagePath,
+        $extractPath
+    )
+}
+
+Get-ChildItem $extractPath -Recurse -Filter 'System.Buffers.dll' |
+    ForEach-Object {
+
+        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
+            $_.FullName
+        )
+
+        [PSCustomObject]@{
+            Version = $assembly.Version
+            Path = $_.FullName
+        }
+    } |
+    Format-Table -AutoSize
+
+-------------------------------------------------------
+
+$ErrorActionPreference = 'Stop'
+
+$runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime_Test"
+
+# Change this to your PDF file
+$pdfPath = 'C:\Temp\Report.pdf'
+
+if (-not (Test-Path $pdfPath)) {
+    throw "PDF file not found: $pdfPath"
+}
+
+# Load dependencies in order
+$loadOrder = @(
+    'System.Runtime.CompilerServices.Unsafe.dll',
+    'System.Buffers.dll',
+    'System.Memory.dll',
+    'Microsoft.Bcl.HashCode.dll'
+)
+
+foreach ($name in $loadOrder) {
+
+    $path = Join-Path $runtime $name
+
+    if (-not (Test-Path $path)) {
+        throw "Missing DLL: $path"
+    }
+
+    $assembly = [Reflection.Assembly]::LoadFrom($path)
+
+    Write-Host "Loaded: $($assembly.GetName().FullName)" `
+        -ForegroundColor Green
+}
+
+# Load PdfPig assemblies
+Get-ChildItem $runtime -Filter 'UglyToad.PdfPig*.dll' |
+    ForEach-Object {
+
+        $assembly = [Reflection.Assembly]::LoadFrom($_.FullName)
+
+        Write-Host "Loaded: $($assembly.GetName().Name)" `
+            -ForegroundColor Green
+    }
+
+# Open PDF
+Write-Host ''
+Write-Host 'Opening PDF...' -ForegroundColor Cyan
+
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
+
+try {
+
+    Write-Host "PDF opened successfully!" -ForegroundColor Green
+    Write-Host "Page count: $($pdf.NumberOfPages)"
+
+    $page = $pdf.GetPage(1)
+
+    $words = @($page.GetWords())
+
+    Write-Host "Word count on page 1: $($words.Count)"
+
+    $words |
+        Select-Object -First 30 |
+        ForEach-Object {
+
+            [PSCustomObject]@{
+                Text = $_.Text
+                X = [Math]::Round($_.BoundingBox.Left, 2)
+                Y = [Math]::Round($_.BoundingBox.Bottom, 2)
+                Width = [Math]::Round($_.BoundingBox.Width, 2)
+                Height = [Math]::Round($_.BoundingBox.Height, 2)
+            }
+        } |
+        Format-Table -AutoSize
+}
+finally {
+    $pdf.Dispose()
+}
+
