@@ -1,0 +1,60 @@
+執行以下 PowerShell：
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+# 查看套件支援哪些 .NET 版本
+Get-ChildItem "$folder\Extracted\lib" -Directory |
+    Select-Object Name, FullName
+
+# 列出所有 DLL
+Get-ChildItem "$folder\Extracted\lib" -Recurse -Filter "*.dll" |
+    Select-Object FullName
+
+----------------------------------
+
+先找出 DLL：
+$folder = "$env:USERPROFILE\Desktop\PdfPigTest"
+
+$dll = Get-ChildItem "$folder\Extracted\lib" `
+    -Recurse -Filter "PdfPig.dll" |
+    Select-Object -First 1
+
+if (-not $dll) {
+    Write-Host "找不到 PdfPig.dll"
+    return
+}
+
+try {
+    Add-Type -Path $dll.FullName -ErrorAction Stop
+    Write-Host "PdfPig DLL 載入成功" -ForegroundColor Green
+}
+catch {
+    Write-Host "DLL 載入失敗" -ForegroundColor Red
+    Write-Host $_.Exception.ToString()
+}
+
+---------------------------------
+
+第三步：確認 PDF 文字與座標
+當 DLL 及相依套件都載入成功後，可以使用以下程式：
+
+$pdfPath = "C:\Temp\Report.pdf"  # 修改為實際 PDF 路徑
+
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
+
+try {
+    $page = $pdf.GetPage(1)
+
+    $page.GetWords() |
+        Select-Object -First 20 |
+        ForEach-Object {
+            [PSCustomObject]@{
+                Text = $_.Text
+                X    = $_.BoundingBox.Left
+                Y    = $_.BoundingBox.Bottom
+            }
+        } |
+        Format-Table -AutoSize
+}
+finally {
+    $pdf.Dispose()
+}
