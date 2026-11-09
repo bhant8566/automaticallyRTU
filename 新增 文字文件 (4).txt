@@ -1,0 +1,77 @@
+$ErrorActionPreference = 'Stop'
+
+$runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime_Test"
+
+# Change this to your PDF file
+$pdfPath = 'C:\Temp\Report.pdf'
+
+if (-not (Test-Path $pdfPath)) {
+    throw "PDF file not found: $pdfPath"
+}
+
+# Load dependencies in order
+$loadOrder = @(
+    'System.Runtime.CompilerServices.Unsafe.dll',
+    'System.Buffers.dll',
+    'System.Memory.dll',
+    'Microsoft.Bcl.HashCode.dll'
+)
+
+foreach ($name in $loadOrder) {
+
+    $path = Join-Path $runtime $name
+
+    if (-not (Test-Path $path)) {
+        throw "Missing DLL: $path"
+    }
+
+    $assembly = [Reflection.Assembly]::LoadFrom($path)
+
+    Write-Host "Loaded: $($assembly.GetName().FullName)" `
+        -ForegroundColor Green
+}
+
+# Load PdfPig assemblies
+Get-ChildItem $runtime -Filter 'UglyToad.PdfPig*.dll' |
+    ForEach-Object {
+
+        $assembly = [Reflection.Assembly]::LoadFrom($_.FullName)
+
+        Write-Host "Loaded: $($assembly.GetName().Name)" `
+            -ForegroundColor Green
+    }
+
+# Open PDF
+Write-Host ''
+Write-Host 'Opening PDF...' -ForegroundColor Cyan
+
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
+
+try {
+
+    Write-Host "PDF opened successfully!" -ForegroundColor Green
+    Write-Host "Page count: $($pdf.NumberOfPages)"
+
+    $page = $pdf.GetPage(1)
+
+    $words = @($page.GetWords())
+
+    Write-Host "Word count on page 1: $($words.Count)"
+
+    $words |
+        Select-Object -First 30 |
+        ForEach-Object {
+
+            [PSCustomObject]@{
+                Text = $_.Text
+                X = [Math]::Round($_.BoundingBox.Left, 2)
+                Y = [Math]::Round($_.BoundingBox.Bottom, 2)
+                Width = [Math]::Round($_.BoundingBox.Width, 2)
+                Height = [Math]::Round($_.BoundingBox.Height, 2)
+            }
+        } |
+        Format-Table -AutoSize
+}
+finally {
+    $pdf.Dispose()
+}
