@@ -1,229 +1,79 @@
 $ErrorActionPreference = 'Stop'
 
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $root = Join-Path $env:USERPROFILE 'Desktop\PdfPigTest'
-$source = Join-Path $root 'Extracted\lib\net471'
 $dependencies = Join-Path $root 'Dependencies'
 $runtime = Join-Path $root 'Runtime_Test'
 
-New-Item -ItemType Directory -Path $runtime -Force | Out-Null
-
-# Copy PdfPig assemblies
-if (-not (Test-Path $source)) {
-    throw "PdfPig net471 directory not found: $source"
-}
-
-Copy-Item (Join-Path $source '*.dll') -Destination $runtime -Force
-
-# Required dependencies and assembly versions
-$required = @(
-    [PSCustomObject]@{
-        Name = 'System.Memory'
-        Version = '4.0.2.0'
-    },
-    [PSCustomObject]@{
-        Name = 'Microsoft.Bcl.HashCode'
-        Version = '6.0.0.0'
-    },
-    [PSCustomObject]@{
-        Name = 'System.Runtime.CompilerServices.Unsafe'
-        Version = '6.0.1.0'
-    },
-    [PSCustomObject]@{
-        Name = 'System.Buffers'
-        Version = '4.0.4.0'
-    }
-)
-
-$missing = @()
-
-foreach ($item in $required) {
-
-    $fileName = "$($item.Name).dll"
-
-    $candidates = @(
-        Get-ChildItem $dependencies -Recurse -Filter $fileName -File |
-            Where-Object { $_.FullName -match '\\lib\\' }
-    )
-
-    $matched = $null
-
-    foreach ($file in $candidates) {
-
-        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
-            $file.FullName
-        )
-
-        if ($assembly.Version.ToString() -eq $item.Version) {
-            # Prefer .NET Framework assets
-            if ($file.FullName -match '\\lib\\net4\d+\\') {
-                $matched = $file
-                break
-            }
-
-            if (-not $matched) {
-                $matched = $file
-            }
-        }
-    }
-
-    if ($matched) {
-
-        Copy-Item $matched.FullName -Destination $runtime -Force
-
-        Write-Host "FOUND: $($item.Name) $($item.Version)" `
-            -ForegroundColor Green
-
-    } else {
-
-        Write-Host "MISSING: $($item.Name) $($item.Version)" `
-            -ForegroundColor Yellow
-
-        $missing += $item
-    }
-}
-
-Write-Host ''
-Write-Host "Runtime directory: $runtime"
-Write-Host "Missing dependencies: $($missing.Count)"
-
-Get-ChildItem $runtime -Filter '*.dll' |
-    ForEach-Object {
-
-        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
-            $_.FullName
-        )
-
-        [PSCustomObject]@{
-            Name = $assembly.Name
-            Version = $assembly.Version
-        }
-    } |
-    Format-Table -AutoSize
-
----------------------------------------------------
-
-
-$ErrorActionPreference = 'Stop'
-
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-$root = "$env:USERPROFILE\Desktop\PdfPigTest"
-$depRoot = Join-Path $root 'Dependencies'
-
-$name = 'system.buffers'
+$name = 'system.numerics.vectors'
 $version = '4.6.0'
+
+$packagePath = Join-Path $dependencies "$name.$version.nupkg"
+$extractPath = Join-Path $dependencies "$name.$version"
 
 $url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
 
-$packagePath = Join-Path $depRoot "$name.$version.nupkg"
-$extractPath = Join-Path $depRoot "$name.$version"
+New-Item -ItemType Directory -Force -Path $dependencies, $runtime | Out-Null
 
-New-Item -ItemType Directory -Path $depRoot -Force | Out-Null
+# Download only if not already present
+if (-not (Test-Path $packagePath)) {
+    Invoke-WebRequest `
+        -Uri $url `
+        -OutFile $packagePath `
+        -UseBasicParsing
+}
 
-Invoke-WebRequest -Uri $url `
-    -OutFile $packagePath `
-    -UseBasicParsing
-
+# Extract NuGet package
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 if (-not (Test-Path $extractPath)) {
-    [IO.Compression.ZipFile]::ExtractToDirectory(
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
         $packagePath,
         $extractPath
     )
 }
 
-Get-ChildItem $extractPath -Recurse -Filter 'System.Buffers.dll' |
-    ForEach-Object {
+# Find DLL with required Assembly Version
+$expectedVersion = '4.1.5.0'
 
-        $assembly = [Reflection.AssemblyName]::GetAssemblyName(
-            $_.FullName
-        )
-
-        [PSCustomObject]@{
-            Version = $assembly.Version
-            Path = $_.FullName
-        }
-    } |
-    Format-Table -AutoSize
-
--------------------------------------------------------
-
-$ErrorActionPreference = 'Stop'
-
-$runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime_Test"
-
-# Change this to your PDF file
-$pdfPath = 'C:\Temp\Report.pdf'
-
-if (-not (Test-Path $pdfPath)) {
-    throw "PDF file not found: $pdfPath"
-}
-
-# Load dependencies in order
-$loadOrder = @(
-    'System.Runtime.CompilerServices.Unsafe.dll',
-    'System.Buffers.dll',
-    'System.Memory.dll',
-    'Microsoft.Bcl.HashCode.dll'
+$candidates = @(
+    Get-ChildItem (Join-Path $extractPath 'lib') `
+        -Recurse `
+        -Filter 'System.Numerics.Vectors.dll' `
+        -File
 )
 
-foreach ($name in $loadOrder) {
+$matched = $null
 
-    $path = Join-Path $runtime $name
+foreach ($file in $candidates) {
 
-    if (-not (Test-Path $path)) {
-        throw "Missing DLL: $path"
+    $assembly = [Reflection.AssemblyName]::GetAssemblyName($file.FullName)
+
+    Write-Host "$($assembly.Version) : $($file.FullName)"
+
+    if ($assembly.Version.ToString() -eq $expectedVersion) {
+
+        # Prefer .NET Framework assembly
+        if ($file.FullName -match '\\lib\\net4\d+\\') {
+            $matched = $file
+            break
+        }
+
+        if (-not $matched) {
+            $matched = $file
+        }
     }
-
-    $assembly = [Reflection.Assembly]::LoadFrom($path)
-
-    Write-Host "Loaded: $($assembly.GetName().FullName)" `
-        -ForegroundColor Green
 }
 
-# Load PdfPig assemblies
-Get-ChildItem $runtime -Filter 'UglyToad.PdfPig*.dll' |
-    ForEach-Object {
+if (-not $matched) {
+    throw "Required Assembly Version $expectedVersion was not found."
+}
 
-        $assembly = [Reflection.Assembly]::LoadFrom($_.FullName)
+Copy-Item $matched.FullName -Destination $runtime -Force
 
-        Write-Host "Loaded: $($assembly.GetName().Name)" `
-            -ForegroundColor Green
-    }
-
-# Open PDF
 Write-Host ''
-Write-Host 'Opening PDF...' -ForegroundColor Cyan
-
-$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
-
-try {
-
-    Write-Host "PDF opened successfully!" -ForegroundColor Green
-    Write-Host "Page count: $($pdf.NumberOfPages)"
-
-    $page = $pdf.GetPage(1)
-
-    $words = @($page.GetWords())
-
-    Write-Host "Word count on page 1: $($words.Count)"
-
-    $words |
-        Select-Object -First 30 |
-        ForEach-Object {
-
-            [PSCustomObject]@{
-                Text = $_.Text
-                X = [Math]::Round($_.BoundingBox.Left, 2)
-                Y = [Math]::Round($_.BoundingBox.Bottom, 2)
-                Width = [Math]::Round($_.BoundingBox.Width, 2)
-                Height = [Math]::Round($_.BoundingBox.Height, 2)
-            }
-        } |
-        Format-Table -AutoSize
-}
-finally {
-    $pdf.Dispose()
-}
-
+Write-Host "Installed: System.Numerics.Vectors $expectedVersion" `
+    -ForegroundColor Green
+Write-Host "Source: $($matched.FullName)"
+Write-Host "Destination: $runtime"
