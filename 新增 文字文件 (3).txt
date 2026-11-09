@@ -1,103 +1,91 @@
 $ErrorActionPreference = "Stop"
 
-# TLS 1.2
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-# 設定資料夾
 $root = "$env:USERPROFILE\Desktop\PdfPigTest"
-$depRoot = Join-Path $root "Dependencies"
+$runtime = Join-Path $root "Runtime"
 
-New-Item -ItemType Directory -Path $depRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $runtime -Force | Out-Null
 
-# 需要下載的套件
-$packages = @(
-    @{ Name = "System.Memory"; Version = "4.6.0" },
-    @{ Name = "Microsoft.Bcl.HashCode"; Version = "6.0.0" }
-)
+# PdfPig：使用 net471
+Copy-Item "$root\Extracted\lib\net471\*.dll" `
+    -Destination $runtime -Force
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+# System.Memory：使用 4.6.0 / net462
+Copy-Item "$root\Dependencies\system.memory.4.6.0\lib\net462\System.Memory.dll" `
+    -Destination $runtime -Force
 
-foreach ($pkg in $packages) {
+# Microsoft.Bcl.HashCode：使用 net462
+Copy-Item "$root\Dependencies\microsoft.bcl.hashcode.6.0.0\lib\net462\Microsoft.Bcl.HashCode.dll" `
+    -Destination $runtime -Force
 
-    $name = $pkg.Name.ToLowerInvariant()
-    $version = $pkg.Version
+Write-Host "Runtime folder created." -ForegroundColor Green
 
-    $url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
+Get-ChildItem $runtime -Filter "*.dll" |
+    Select-Object Name
 
-    $file = Join-Path $depRoot "$name.$version.nupkg"
-    $destination = Join-Path $depRoot "$name.$version"
+-------------------------------------------
 
-    Write-Host "Downloading $name $version"
-
-    # 下載
-    Invoke-WebRequest -Uri $url `
-        -OutFile $file `
-        -UseBasicParsing
-
-    # 解壓縮
-    if (-not (Test-Path $destination)) {
-
-        [System.IO.Compression.ZipFile]::ExtractToDirectory(
-            $file,
-            $destination
-        )
-    }
-
-    Write-Host "Completed: $name" -ForegroundColor Green
-}
-
-Write-Host "`nAll downloads completed."
-
----------------------------------------------
-
-檢查 DLL 版本與相依套件
 $ErrorActionPreference = "Stop"
 
-$root = "$env:USERPROFILE\Desktop\PdfPigTest\Dependencies"
+$runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime"
 
-# 1. 查看 DLL 與 Assembly Version
-Write-Host "`n=== DLL Information ===" -ForegroundColor Cyan
+try {
+    # 先載入目前已知的相依 DLL
+    $dependencies = @(
+        "System.Memory.dll",
+        "Microsoft.Bcl.HashCode.dll"
+    )
 
-Get-ChildItem $root -Recurse -Filter "*.dll" |
-    Where-Object {
-        $_.FullName -match '\\lib\\'
-    } |
-    ForEach-Object {
+    foreach ($dll in $dependencies) {
+        $path = Join-Path $runtime $dll
 
-        $assembly = [System.Reflection.AssemblyName]::GetAssemblyName(
-            $_.FullName
-        )
+        $assembly = [System.Reflection.Assembly]::LoadFrom($path)
 
-        [PSCustomObject]@{
-            Name    = $assembly.Name
-            Version = $assembly.Version
-            Path    = $_.FullName
-        }
-    } |
-    Format-Table -AutoSize
+        Write-Host "Loaded: $($assembly.GetName().Name)" `
+            -ForegroundColor Green
+    }
 
+    # 載入 PdfPig 主組件
+    $pdfPigPath = Join-Path $runtime "UglyToad.PdfPig.dll"
 
-# 2. 查看 System.Memory 相依套件
-Write-Host "`n=== System.Memory Dependencies ===" -ForegroundColor Cyan
+    $pdfAssembly = [System.Reflection.Assembly]::LoadFrom($pdfPigPath)
 
-$nuspec = Get-ChildItem $root -Recurse -Filter "System.Memory.nuspec" |
-    Select-Object -First 1
+    Write-Host "Loaded: $($pdfAssembly.GetName().Name)" `
+        -ForegroundColor Green
 
-if (-not $nuspec) {
-    throw "System.Memory.nuspec not found."
+    # 驗證主類別
+    $pdfType = $pdfAssembly.GetType(
+        "UglyToad.PdfPig.PdfDocument",
+        $true
+    )
+
+    Write-Host "PdfDocument type found: $($pdfType.FullName)" `
+        -ForegroundColor Green
+}
+catch {
+    Write-Host "Loading failed:" -ForegroundColor Red
+    Write-Host $_.Exception.ToString()
 }
 
-[xml]$xml = Get-Content $nuspec.FullName -Raw -Encoding UTF8
+--------------------
 
-$xml.package.metadata.dependencies.group |
-    Where-Object {
-        $_.targetFramework -match '4\.6\.2'
-    } |
-    ForEach-Object {
+$pdfPath = "C:\Temp\Report.pdf"
 
-        Write-Host "Framework: $($_.targetFramework)"
+$pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
 
-        $_.dependency | ForEach-Object {
-            Write-Host "$($_.id) : $($_.version)"
-        }
-    }
+try {
+    $page = $pdf.GetPage(1)
+
+    $page.GetWords() |
+        Select-Object -First 20 |
+        ForEach-Object {
+            [PSCustomObject]@{
+                Text = $_.Text
+                X    = $_.BoundingBox.Left
+                Y    = $_.BoundingBox.Bottom
+            }
+        } |
+        Format-Table -AutoSize
+}
+finally {
+    $pdf.Dispose()
+}
