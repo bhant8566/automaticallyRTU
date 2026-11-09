@@ -1,20 +1,103 @@
-$nuspec = "$env:USERPROFILE\Desktop\PdfPigTest\Extracted\PdfPig.nuspec"
+$ErrorActionPreference = "Stop"
 
-[xml]$xml = Get-Content $nuspec -Raw -Encoding UTF8
+# TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$xml.package.metadata.dependencies.group |
-    ForEach-Object {
-        Write-Host "`nFramework: $($_.targetFramework)"
+# 設定資料夾
+$root = "$env:USERPROFILE\Desktop\PdfPigTest"
+$depRoot = Join-Path $root "Dependencies"
 
-        $_.dependency | ForEach-Object {
-            Write-Host "  $($_.id) : $($_.version)"
-        }
+New-Item -ItemType Directory -Path $depRoot -Force | Out-Null
+
+# 需要下載的套件
+$packages = @(
+    @{ Name = "System.Memory"; Version = "4.6.0" },
+    @{ Name = "Microsoft.Bcl.HashCode"; Version = "6.0.0" }
+)
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+foreach ($pkg in $packages) {
+
+    $name = $pkg.Name.ToLowerInvariant()
+    $version = $pkg.Version
+
+    $url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
+
+    $file = Join-Path $depRoot "$name.$version.nupkg"
+    $destination = Join-Path $depRoot "$name.$version"
+
+    Write-Host "Downloading $name $version"
+
+    # 下載
+    Invoke-WebRequest -Uri $url `
+        -OutFile $file `
+        -UseBasicParsing
+
+    # 解壓縮
+    if (-not (Test-Path $destination)) {
+
+        [System.IO.Compression.ZipFile]::ExtractToDirectory(
+            $file,
+            $destination
+        )
     }
 
+    Write-Host "Completed: $name" -ForegroundColor Green
+}
 
-第三步：順便確認 .NET Framework
-$net = Get-ItemProperty `
-    'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full'
+Write-Host "`nAll downloads completed."
 
-Write-Host "Release: $($net.Release)"
-Write-Host "Version: $($net.Version)"
+---------------------------------------------
+
+檢查 DLL 版本與相依套件
+$ErrorActionPreference = "Stop"
+
+$root = "$env:USERPROFILE\Desktop\PdfPigTest\Dependencies"
+
+# 1. 查看 DLL 與 Assembly Version
+Write-Host "`n=== DLL Information ===" -ForegroundColor Cyan
+
+Get-ChildItem $root -Recurse -Filter "*.dll" |
+    Where-Object {
+        $_.FullName -match '\\lib\\'
+    } |
+    ForEach-Object {
+
+        $assembly = [System.Reflection.AssemblyName]::GetAssemblyName(
+            $_.FullName
+        )
+
+        [PSCustomObject]@{
+            Name    = $assembly.Name
+            Version = $assembly.Version
+            Path    = $_.FullName
+        }
+    } |
+    Format-Table -AutoSize
+
+
+# 2. 查看 System.Memory 相依套件
+Write-Host "`n=== System.Memory Dependencies ===" -ForegroundColor Cyan
+
+$nuspec = Get-ChildItem $root -Recurse -Filter "System.Memory.nuspec" |
+    Select-Object -First 1
+
+if (-not $nuspec) {
+    throw "System.Memory.nuspec not found."
+}
+
+[xml]$xml = Get-Content $nuspec.FullName -Raw -Encoding UTF8
+
+$xml.package.metadata.dependencies.group |
+    Where-Object {
+        $_.targetFramework -match '4\.6\.2'
+    } |
+    ForEach-Object {
+
+        Write-Host "Framework: $($_.targetFramework)"
+
+        $_.dependency | ForEach-Object {
+            Write-Host "$($_.id) : $($_.version)"
+        }
+    }
