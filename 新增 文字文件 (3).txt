@@ -1,72 +1,82 @@
 $ErrorActionPreference = "Stop"
 
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $root = "$env:USERPROFILE\Desktop\PdfPigTest"
+$depRoot = Join-Path $root "Dependencies"
 $runtime = Join-Path $root "Runtime"
 
-New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+$name = "system.runtime.compilerservices.unsafe"
+$version = "6.1.0"
 
-# PdfPig：使用 net471
-Copy-Item "$root\Extracted\lib\net471\*.dll" `
-    -Destination $runtime -Force
+$url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
 
-# System.Memory：使用 4.6.0 / net462
-Copy-Item "$root\Dependencies\system.memory.4.6.0\lib\net462\System.Memory.dll" `
-    -Destination $runtime -Force
+$packagePath = Join-Path $depRoot "$name.$version.nupkg"
+$extractPath = Join-Path $depRoot "$name.$version"
 
-# Microsoft.Bcl.HashCode：使用 net462
-Copy-Item "$root\Dependencies\microsoft.bcl.hashcode.6.0.0\lib\net462\Microsoft.Bcl.HashCode.dll" `
-    -Destination $runtime -Force
+# 下載套件
+Invoke-WebRequest -Uri $url `
+    -OutFile $packagePath `
+    -UseBasicParsing
 
-Write-Host "Runtime folder created." -ForegroundColor Green
+# 解壓縮
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-Get-ChildItem $runtime -Filter "*.dll" |
-    Select-Object Name
+if (-not (Test-Path $extractPath)) {
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
+        $packagePath,
+        $extractPath
+    )
+}
 
--------------------------------------------
+# 尋找適合 .NET Framework 的 DLL
+$dllPath = Join-Path $extractPath `
+    "lib\net462\System.Runtime.CompilerServices.Unsafe.dll"
 
-$ErrorActionPreference = "Stop"
+if (-not (Test-Path $dllPath)) {
+    Write-Host "net462 DLL not found. Available files:" -ForegroundColor Yellow
+
+    Get-ChildItem "$extractPath\lib" -Recurse -Filter "*.dll" |
+        Select-Object FullName
+
+    throw "Please verify the correct target framework."
+}
+
+# 檢查 Assembly Version
+$assembly = [System.Reflection.AssemblyName]::GetAssemblyName($dllPath)
+
+Write-Host "Assembly: $($assembly.Name)"
+Write-Host "Version: $($assembly.Version)"
+
+# 複製到 Runtime
+Copy-Item $dllPath -Destination $runtime -Force
+
+Write-Host "DLL copied successfully." -ForegroundColor Green
+
+----------------------------------------------------------------------
 
 $runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime"
 
-try {
-    # 先載入目前已知的相依 DLL
-    $dependencies = @(
-        "System.Memory.dll",
-        "Microsoft.Bcl.HashCode.dll"
-    )
+$dependencies = @(
+    "System.Runtime.CompilerServices.Unsafe.dll",
+    "System.Memory.dll",
+    "Microsoft.Bcl.HashCode.dll"
+)
 
-    foreach ($dll in $dependencies) {
-        $path = Join-Path $runtime $dll
+foreach ($dll in $dependencies) {
+    $path = Join-Path $runtime $dll
 
-        $assembly = [System.Reflection.Assembly]::LoadFrom($path)
+    $assembly = [System.Reflection.Assembly]::LoadFrom($path)
 
-        Write-Host "Loaded: $($assembly.GetName().Name)" `
-            -ForegroundColor Green
-    }
-
-    # 載入 PdfPig 主組件
-    $pdfPigPath = Join-Path $runtime "UglyToad.PdfPig.dll"
-
-    $pdfAssembly = [System.Reflection.Assembly]::LoadFrom($pdfPigPath)
-
-    Write-Host "Loaded: $($pdfAssembly.GetName().Name)" `
-        -ForegroundColor Green
-
-    # 驗證主類別
-    $pdfType = $pdfAssembly.GetType(
-        "UglyToad.PdfPig.PdfDocument",
-        $true
-    )
-
-    Write-Host "PdfDocument type found: $($pdfType.FullName)" `
-        -ForegroundColor Green
-}
-catch {
-    Write-Host "Loading failed:" -ForegroundColor Red
-    Write-Host $_.Exception.ToString()
+    Write-Host "Loaded: $($assembly.GetName().Name)" -ForegroundColor Green
 }
 
---------------------
+# 載入 PdfPig
+[System.Reflection.Assembly]::LoadFrom(
+    (Join-Path $runtime "UglyToad.PdfPig.dll")
+) | Out-Null
+
+Write-Host "PdfPig loaded." -ForegroundColor Green
 
 $pdfPath = "C:\Temp\Report.pdf"
 
