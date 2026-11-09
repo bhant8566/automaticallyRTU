@@ -1,88 +1,371 @@
-$ErrorActionPreference = "Stop"
 
+$ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$root = "$env:USERPROFILE\Desktop\PdfPigTest"
-$depRoot = Join-Path $root "Dependencies"
-$runtime = Join-Path $root "Runtime"
+$root = Join-Path $env:USERPROFILE 'Desktop\PdfPigTest'
+$packageRoot = Join-Path $root 'AutoPackages'
+$runtime = Join-Path $root 'Runtime'
+$source = Join-Path $root 'Extracted'
 
-$name = "system.runtime.compilerservices.unsafe"
-$version = "6.1.0"
-
-$url = "https://api.nuget.org/v3-flatcontainer/$name/$version/$name.$version.nupkg"
-
-$packagePath = Join-Path $depRoot "$name.$version.nupkg"
-$extractPath = Join-Path $depRoot "$name.$version"
-
-# 下載套件
-Invoke-WebRequest -Uri $url `
-    -OutFile $packagePath `
-    -UseBasicParsing
-
-# 解壓縮
+New-Item -ItemType Directory -Force -Path $packageRoot, $runtime | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-if (-not (Test-Path $extractPath)) {
-    [System.IO.Compression.ZipFile]::ExtractToDirectory(
-        $packagePath,
-        $extractPath
+# Target: .NET Framework 4.8
+# Prefer the nearest compatible framework group.
+function Get-FrameworkRank {
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return 0 }
+
+    $n = $Name.ToLowerInvariant()
+    $n = $n -replace '^\.netframework,version=v', ''
+    $n = $n -replace '^\.netframework', ''
+    $n = $n -replace '^net', ''
+    $n = $n -replace '\.', ''
+
+    if ($n -match '^\d+$') {
+        $v = [int]$n
+        if ($v -ge 20 -and $v -le 48) { return $v }
+    }
+
+    # This deployment intentionally does not select
+    # .NET Core or .NET Standard assets.
+    return -1
+}
+
+function Get-Dependencies {
+    param([string]$Nuspec)
+
+    [xml]$xml = Get-Content -LiteralPath $Nuspec -Raw -Encoding UTF8
+    $node = $xml.package.metadata.dependencies
+
+    if ($null -eq $node) { return @() }
+
+    $groups = @($node.group) | Where-Object { $null -ne $_ }
+    if ($groups.Count -eq 0) {
+        return @($node.dependency) | Where-Object { $null -ne $_ }
+    }
+
+    $selected = $groups |
+        Where-Object {
+            (Get-FrameworkRank ([string]$_.targetFramework)) -ge 0
+        } |
+        Sort-Object {
+            Get-FrameworkRank ([string]$_.targetFramework)
+        } -Descending |
+        Select-Object -First 1
+
+    if ($null -eq $selected) {
+        throw "No compatible dependency group: $Nuspec"
+    }
+
+    return @($selected.dependency) | Where-Object { $null -ne $_ }
+}
+
+function Convert-Version {
+    param([string]$Value)
+
+    $s = $Value.Split('-')[0]
+    $parts = @($s.Split('.'))
+
+    while ($parts.Count -lt 4) {
+        $parts += '0'
+    }
+
+    return [version]($parts[0..3] -join '.')
+}
+
+function Test-VersionRange {
+    param(
+        [string]$Version,
+        [string]$Range
     )
+
+    $v = Convert-Version $Version
+    $r = $Range.Trim()
+
+    if ($r -match '^\[([^\],]+)\]$') {
+        return $v -eq (Convert-Version $matches[1])
+    }
+
+    if ($r -match '^([\[\(])([^,]*),([^\]\)]*)([\]\)])$') {
+        $left = $matches[1]
+        $min = $matches[2].Trim()
+        $max = $matches[3].Trim()
+        $right = $matches[4]
+
+        if ($min) {
+            $m = Convert-Version $min
+            if ($v -lt $m -or ($v -eq $m -and $left -eq '(')) {
+                return $false
+            }
+        }
+
+        if ($max) {
+            $m = Convert-Version $max
+            if ($v -gt $m -or ($v -eq $m -and $right -eq ')')) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    if ($r -match '^[0-9]+(\.[0-9]+)*$') {
+        return $v -ge (Convert-Version $r)
+    }
+
+    throw "Unsupported NuGet version range: $Range"
 }
 
-# 尋找適合 .NET Framework 的 DLL
-$dllPath = Join-Path $extractPath `
-    "lib\net462\System.Runtime.CompilerServices.Unsafe.dll"
+$constraints = @{}
+$selectedVersions = @{}
+$processed = @{}
+$manifest = New-Object 'System.Collections.Generic.List[object]'
+$queue = New-Object System.Collections.Queue
 
-if (-not (Test-Path $dllPath)) {
-    Write-Host "net462 DLL not found. Available files:" -ForegroundColor Yellow
+function Add-Requirement {
+    param(
+        [string]$Id,
+        [string]$Range
+    )
 
-    Get-ChildItem "$extractPath\lib" -Recurse -Filter "*.dll" |
-        Select-Object FullName
+    $key = $Id.ToLowerInvariant()
 
-    throw "Please verify the correct target framework."
+    if (-not $constraints.ContainsKey($key)) {
+        $constraints[$key] = New-Object 'System.Collections.Generic.List[string]'
+    }
+
+    if (-not $constraints[$key].Contains($Range)) {
+        $constraints[$key].Add($Range)
+    }
+
+    $queue.Enqueue($key)
 }
 
-# 檢查 Assembly Version
-$assembly = [System.Reflection.AssemblyName]::GetAssemblyName($dllPath)
+function Get-PackageVersions {
+    param([string]$Id)
 
-Write-Host "Assembly: $($assembly.Name)"
-Write-Host "Version: $($assembly.Version)"
+    $url = "https://api.nuget.org/v3-flatcontainer/$Id/index.json"
+    $response = Invoke-RestMethod -Uri $url
 
-# 複製到 Runtime
-Copy-Item $dllPath -Destination $runtime -Force
+    return @($response.versions) |
+        Where-Object { $_ -notmatch '-' } |
+        Sort-Object { Convert-Version $_ }
+}
 
-Write-Host "DLL copied successfully." -ForegroundColor Green
+function Install-Package {
+    param(
+        [string]$Id,
+        [string]$Version
+    )
 
-----------------------------------------------------------------------
+    $folder = Join-Path $packageRoot "$Id.$Version"
 
-$runtime = "$env:USERPROFILE\Desktop\PdfPigTest\Runtime"
+    if (-not (Test-Path $folder)) {
+        $file = Join-Path $packageRoot "$Id.$Version.nupkg"
+        $url = "https://api.nuget.org/v3-flatcontainer/$Id/$Version/$Id.$Version.nupkg"
 
-$dependencies = @(
-    "System.Runtime.CompilerServices.Unsafe.dll",
-    "System.Memory.dll",
-    "Microsoft.Bcl.HashCode.dll"
+        Write-Host "Downloading $Id $Version" -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing
+
+        [System.IO.Compression.ZipFile]::ExtractToDirectory(
+            $file, $folder
+        )
+    }
+
+    return $folder
+}
+
+# Read the existing PdfPig package manifest
+$mainNuspec = Get-ChildItem $source -Filter '*.nuspec' |
+    Select-Object -First 1
+
+if (-not $mainNuspec) {
+    throw "PdfPig.nuspec not found in $source"
+}
+
+foreach ($dep in (Get-Dependencies $mainNuspec.FullName)) {
+    Add-Requirement ([string]$dep.id) ([string]$dep.version)
+}
+
+# Resolve dependencies recursively
+$iterations = 0
+
+while ($queue.Count -gt 0) {
+    $iterations++
+    if ($iterations -gt 300) {
+        throw 'Dependency resolution exceeded safety limit.'
+    }
+
+    $id = [string]$queue.Dequeue()
+    $ranges = @($constraints[$id])
+
+    $versions = Get-PackageVersions $id
+
+    $chosen = $null
+    foreach ($candidate in $versions) {
+        $valid = $true
+
+        foreach ($range in $ranges) {
+            if (-not (Test-VersionRange $candidate $range)) {
+                $valid = $false
+                break
+            }
+        }
+
+        if ($valid) {
+            $chosen = $candidate
+            break
+        }
+    }
+
+    if (-not $chosen) {
+        throw "Version conflict: $id requires $($ranges -join ', ')"
+    }
+
+    if ($selectedVersions.ContainsKey($id) -and
+        $selectedVersions[$id] -eq $chosen -and
+        $processed.ContainsKey("$id@$chosen")) {
+        continue
+    }
+
+    $selectedVersions[$id] = $chosen
+    $folder = Install-Package $id $chosen
+
+    $nuspec = Get-ChildItem $folder -Filter '*.nuspec' |
+        Select-Object -First 1
+
+    if (-not $nuspec) {
+        throw "Missing nuspec: $id $chosen"
+    }
+
+    $processed["$id@$chosen"] = $true
+
+    foreach ($dep in (Get-Dependencies $nuspec.FullName)) {
+        Add-Requirement ([string]$dep.id) ([string]$dep.version)
+    }
+}
+
+# Prepare DLL deployment
+# Stop on duplicate names instead of silently overwriting.
+$dllMap = @{}
+
+function Add-Dll {
+    param([string]$Path)
+
+    $name = [IO.Path]::GetFileName($Path).ToLowerInvariant()
+
+    if ($dllMap.ContainsKey($name)) {
+        $existing = [Reflection.AssemblyName]::GetAssemblyName(
+            $dllMap[$name]
+        )
+        $incoming = [Reflection.AssemblyName]::GetAssemblyName($Path)
+
+        if ($existing.FullName -ne $incoming.FullName) {
+            throw "Assembly conflict: $name"
+        }
+        return
+    }
+
+    $dllMap[$name] = $Path
+}
+
+# Main PdfPig assemblies
+Get-ChildItem (Join-Path $source 'lib\net471') -Filter '*.dll' |
+    ForEach-Object { Add-Dll $_.FullName }
+
+# Dependency assemblies
+foreach ($id in $selectedVersions.Keys) {
+    $version = $selectedVersions[$id]
+    $folder = Join-Path $packageRoot "$id.$version"
+    $lib = Join-Path $folder 'lib'
+
+    if (-not (Test-Path $lib)) {
+        Write-Warning "No lib folder: $id"
+        continue
+    }
+
+    $compatible = Get-ChildItem $lib -Directory |
+        Where-Object {
+            (Get-FrameworkRank $_.Name) -ge 0
+        } |
+        Sort-Object {
+            Get-FrameworkRank $_.Name
+        } -Descending |
+        Select-Object -First 1
+
+    if (-not $compatible) {
+        throw "No supported .NET Framework DLL assets: $id $version"
+    }
+
+    Get-ChildItem $compatible.FullName -Filter '*.dll' |
+        ForEach-Object { Add-Dll $_.FullName }
+
+    $manifest.Add([PSCustomObject]@{
+        Package = $id
+        Version = $version
+        Framework = $compatible.Name
+    })
+}
+
+# Copy only after resolution succeeds
+foreach ($name in $dllMap.Keys) {
+    Copy-Item $dllMap[$name] -Destination $runtime -Force
+}
+
+$manifest |
+    Sort-Object Package |
+    Export-Csv (Join-Path $root 'PackageManifest.csv') `
+        -NoTypeInformation -Encoding UTF8
+
+Write-Host ''
+Write-Host 'Dependency download and deployment completed.' -ForegroundColor Green
+Write-Host "Runtime: $runtime"
+Write-Host "Packages: $($manifest.Count)"
+Write-Host "DLL files: $($dllMap.Count)"
+
+
+------------------------------------------------
+
+
+
+$ErrorActionPreference = 'Stop'
+
+$runtime = Join-Path $env:USERPROFILE 'Desktop\PdfPigTest\Runtime'
+
+# Change to your PDF file
+$pdfPath = 'C:\Temp\Report.pdf'
+
+# Load dependencies first
+$priority = @(
+    'System.Runtime.CompilerServices.Unsafe.dll',
+    'System.Buffers.dll',
+    'System.Memory.dll',
+    'Microsoft.Bcl.HashCode.dll'
 )
 
-foreach ($dll in $dependencies) {
-    $path = Join-Path $runtime $dll
+foreach ($name in $priority) {
+    $path = Join-Path $runtime $name
 
-    $assembly = [System.Reflection.Assembly]::LoadFrom($path)
-
-    Write-Host "Loaded: $($assembly.GetName().Name)" -ForegroundColor Green
+    if (Test-Path $path) {
+        [Reflection.Assembly]::LoadFrom($path) | Out-Null
+        Write-Host "Loaded: $name"
+    }
 }
 
-# 載入 PdfPig
-[System.Reflection.Assembly]::LoadFrom(
-    (Join-Path $runtime "UglyToad.PdfPig.dll")
-) | Out-Null
+# Load PdfPig assemblies
+Get-ChildItem $runtime -Filter 'UglyToad.PdfPig*.dll' |
+    ForEach-Object {
+        [Reflection.Assembly]::LoadFrom($_.FullName) | Out-Null
+    }
 
-Write-Host "PdfPig loaded." -ForegroundColor Green
-
-$pdfPath = "C:\Temp\Report.pdf"
-
+# Open PDF
 $pdf = [UglyToad.PdfPig.PdfDocument]::Open($pdfPath)
 
 try {
+    Write-Host "PDF pages: $($pdf.NumberOfPages)"
+
     $page = $pdf.GetPage(1)
 
     $page.GetWords() |
@@ -90,8 +373,8 @@ try {
         ForEach-Object {
             [PSCustomObject]@{
                 Text = $_.Text
-                X    = $_.BoundingBox.Left
-                Y    = $_.BoundingBox.Bottom
+                X = $_.BoundingBox.Left
+                Y = $_.BoundingBox.Bottom
             }
         } |
         Format-Table -AutoSize
@@ -99,3 +382,4 @@ try {
 finally {
     $pdf.Dispose()
 }
+
