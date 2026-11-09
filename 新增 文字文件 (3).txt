@@ -1,56 +1,162 @@
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$root = Join-Path $env:USERPROFILE 'Desktop\PdfPigTest'
+$tools = Join-Path $root 'Tools'
+$packages = Join-Path $root 'NuGetPackages'
+$runtime = Join-Path $root 'Runtime_NuGet'
+$nuget = Join-Path $tools 'nuget.exe'
+$nuspec = Join-Path $root 'Extracted\PdfPig.nuspec'
+
+New-Item -ItemType Directory -Force -Path $tools, $packages | Out-Null
+
+# 1. Read exact PdfPig package version
+if (-not (Test-Path $nuspec)) {
+    throw "Cannot find PdfPig.nuspec: $nuspec"
+}
+
+[xml]$xml = Get-Content $nuspec -Raw -Encoding UTF8
+$packageId = [string]$xml.package.metadata.id
+$packageVersion = [string]$xml.package.metadata.version
+
+if ($packageId -ne 'PdfPig' -or -not $packageVersion) {
+    throw "Unexpected PdfPig package metadata."
+}
+
+Write-Host "Package: $packageId"
+Write-Host "Version: $packageVersion"
+
+# 2. Download official NuGet CLI
+if (-not (Test-Path $nuget)) {
+    $url = 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe'
+
+    Write-Host 'Downloading NuGet CLI...' -ForegroundColor Cyan
+
+    Invoke-WebRequest `
+        -Uri $url `
+        -OutFile $nuget `
+        -UseBasicParsing
+}
+
+# 3. Verify NuGet can execute
+& $nuget help | Select-Object -First 5
+
+if ($LASTEXITCODE -ne 0) {
+    throw 'NuGet CLI failed to start.'
+}
+
+# 4. Install PdfPig and transitive dependencies
+Write-Host 'Restoring PdfPig dependencies...' -ForegroundColor Cyan
+
+& $nuget install $packageId `
+    -Version $packageVersion `
+    -Framework net48 `
+    -OutputDirectory $packages `
+    -Source 'https://api.nuget.org/v3/index.json' `
+    -DependencyVersion Lowest `
+    -NonInteractive `
+    -Verbosity normal
+
+if ($LASTEXITCODE -ne 0) {
+    throw "NuGet installation failed. Exit code: $LASTEXITCODE"
+}
+
+# 5. Select .NET Framework assets
 function Get-FrameworkRank {
     param([string]$Name)
 
-    if ([string]::IsNullOrWhiteSpace($Name)) {
-        return 0
-    }
-
-    $n = $Name.Trim().ToLowerInvariant()
-
-    # NuGet Framework names:
-    # .NETFramework4.7.1
-    # .NETFramework,Version=v4.7.1
-    # net471
-    # net462
-
-    if ($n -match '^\.netframework(?:,version=v)?(\d+)\.(\d+)(?:\.(\d+))?$') {
-
-        $major = [int]$matches[1]
-        $minor = [int]$matches[2]
-        $patch = 0
-
-        if ($matches[3]) {
-            $patch = [int]$matches[3]
-        }
-
-        $rank = $major * 100 + $minor * 10 + $patch
-
-        if ($rank -le 480) {
-            return $rank
-        }
-
-        return -1
-    }
+    $n = $Name.ToLowerInvariant()
 
     if ($n -match '^net(4)(\d)(\d?)$') {
-
-        $major = [int]$matches[1]
-        $minor = [int]$matches[2]
-        $patch = 0
+        $rank = 400 + ([int]$matches[2] * 10)
 
         if ($matches[3]) {
-            $patch = [int]$matches[3]
+            $rank += [int]$matches[3]
         }
-
-        $rank = $major * 100 + $minor * 10 + $patch
 
         if ($rank -le 480) {
             return $rank
         }
-
-        return -1
     }
 
-    # Reject .NET 6/8/9 and unsupported frameworks
     return -1
 }
+
+# 6. Prepare clean runtime directory
+if (Test-Path $runtime) {
+    Remove-Item $runtime -Recurse -Force
+}
+
+New-Item -ItemType Directory -Path $runtime | Out-Null
+
+$dllMap = @{}
+$manifest = @()
+
+foreach ($folder in (Get-ChildItem $packages -Directory)) {
+
+    $lib = Join-Path $folder.FullName 'lib'
+
+    if (-not (Test-Path $lib)) {
+        Write-Warning "No lib folder: $($folder.Name)"
+        continue
+    }
+
+    $framework = Get-ChildItem $lib -Directory |
+        Where-Object {
+            (Get-FrameworkRank $_.Name) -ge 0
+        } |
+        Sort-Object {
+            Get-FrameworkRank $_.Name
+        } -Descending |
+        Select-Object -First 1
+
+    if (-not $framework) {
+        throw "No compatible .NET Framework DLL: $($folder.Name)"
+    }
+
+    $dlls = @(Get-ChildItem $framework.FullName -Filter '*.dll')
+
+    foreach ($dll in $dlls) {
+
+        $key = $dll.Name.ToLowerInvariant()
+        $identity = [Reflection.AssemblyName]::GetAssemblyName($dll.FullName)
+
+        if ($dllMap.ContainsKey($key)) {
+            $existing = [Reflection.AssemblyName]::GetAssemblyName(
+                $dllMap[$key]
+            )
+
+            if ($existing.FullName -ne $identity.FullName) {
+                throw "DLL version conflict: $($dll.Name)"
+            }
+
+            continue
+        }
+
+        $dllMap[$key] = $dll.FullName
+    }
+
+    $manifest += [PSCustomObject]@{
+        Package = $folder.Name
+        Framework = $framework.Name
+        DllCount = $dlls.Count
+    }
+}
+
+# 7. Copy DLLs into clean Runtime
+foreach ($key in $dllMap.Keys) {
+    Copy-Item $dllMap[$key] -Destination $runtime -Force
+}
+
+$manifest |
+    Export-Csv (Join-Path $root 'NuGetManifest.csv') `
+        -NoTypeInformation -Encoding UTF8
+
+Write-Host ''
+Write-Host 'NuGet installation completed.' -ForegroundColor Green
+Write-Host "Runtime: $runtime"
+Write-Host "DLL count: $($dllMap.Count)"
+
+Get-ChildItem $runtime -Filter '*.dll' |
+    Select-Object Name |
+    Format-Table -AutoSize
