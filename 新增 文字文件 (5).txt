@@ -1,0 +1,96 @@
+#requires -Version 5.1
+<#
+.SYNOPSIS
+  Extract positional text from PDFs and generate layout diagnostics, without assuming fixed column names/count.
+.EXAMPLE
+  .\Test-PdfLayout.ps1 -InputDirectory '.\InputPDF' -DllDirectory '.\Runtime_Test' -OutputDirectory '.\Diagnostics' -MaxPages 2
+.EXAMPLE
+  .\Test-PdfLayout.ps1 -WordsCsv '.\PdfWords.csv' -OutputDirectory '.\Diagnostics'
+.NOTES
+  PowerShell 5.1; uses existing PdfPig DLLs. This is a diagnostic tool, not a guaranteed table parser.
+#>
+[CmdletBinding(DefaultParameterSetName='Pdf')]
+param(
+    [Parameter(ParameterSetName='Pdf')][string]$InputDirectory = (Join-Path $PSScriptRoot 'InputPDF'),
+    [Parameter(ParameterSetName='Pdf')][string]$DllDirectory = (Join-Path $PSScriptRoot 'Runtime_Test'),
+    [Parameter(Mandatory=$true,ParameterSetName='Csv')][string]$WordsCsv,
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'Diagnostics'),
+    [ValidateRange(1,10000)][int]$MaxPages = 2,
+    [ValidateRange(0.1,20)][double]$YTolerance = 2.5,
+    [ValidateRange(0.1,30)][double]$XTolerance = 4.0
+)
+$ErrorActionPreference = 'Stop'
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
+New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+
+function Convert-Number($v) {
+    return [double]::Parse(([string]$v),[System.Globalization.NumberStyles]::Float,$invariant)
+}
+function Write-Utf8Csv($items,$path) {
+    @($items) | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
+}
+function Get-Lines($wordItems) {
+    $lines = New-Object 'System.Collections.Generic.List[object]'
+    $sorted = @($wordItems | Sort-Object @{Expression={-(Convert-Number $_.Y)}},@{Expression={Convert-Number $_.X}})
+    foreach ($w in $sorted) {
+        $y = Convert-Number $w.Y
+        $found = $null
+        foreach ($ln in $lines) {
+            if ([math]::Abs($ln.Y - $y) -le $YTolerance) { $found = $ln; break }
+        }
+        if ($null -eq $found) {
+            $found = [pscustomobject]@{Y=$y;Words=(New-Object 'System.Collections.ArrayList')}
+            $lines.Add($found)
+        }
+        [void]$found.Words.Add($w)
+    }
+    return @($lines | Sort-Object Y -Descending)
+}
+function Analyze-Report($reportName,$words) {
+    $safeName = $reportName -replace '[^a-zA-Z0-9_\-]','_'
+    $reportFolder = Join-Path $OutputDirectory $safeName
+    New-Item -ItemType Directory -Force -Path $reportFolder | Out-Null
+    $allWords = @($words)
+    if ($allWords.Count -eq 0) { Write-Warning "No words: $reportName"; return }
+    Write-Utf8Csv $allWords (Join-Path $reportFolder 'Words.csv')
+    $lineOut = New-Object 'System.Collections.Generic.List[object]'
+    $clusterOut = New-Object 'System.Collections.Generic.List[object]'
+    $footerOut = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($pg in ($allWords | Group-Object Page | Sort-Object {[int]$_.Name})) {
+        $lines = @(Get-Lines $pg.Group)
+        $lineNo=0
+        foreach ($ln in $lines) {
+            $lineNo++
+            $ww = @($ln.Words | Sort-Object {Convert-Number $_.X})
+            $txt = ($ww | ForEach-Object {$_.Text}) -join ' '
+            $minX = ($ww | Measure-Object -Property X -Minimum).Minimum
+            $lineOut.Add([pscustomobject]@{Page=[int]$pg.Name;Line=$lineNo;Y=$ln.Y;WordCount=$ww.Count;MinX=$minX;Text=$txt})
+            if ($txt -match '(?i)\bpage\s*:\s*\d+\b') {
+                $footerOut.Add([pscustomobject]@{Page=[int]$pg.Name;Y=$ln.Y;Text=$txt})
+            }
+        }
+        # X-position clustering across words: candidates only; multi-word headings also create clusters.
+        $clusters = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($w in @($pg.Group | Sort-Object {Convert-Number $_.X})) {
+            $x=Convert-Number $w.X
+            $nearest=$null; $dist=[double]::PositiveInfinity
+            foreach ($c in $clusters) {
+                $d=[math]::Abs($c.Center-$x)
+                if ($d -le $XTolerance -and $d -lt $dist) {$nearest=$c;$dist=$d}
+            }
+            if ($null -eq $nearest) {
+                $nearest=[pscustomobject]@{Center=$x;Count=0;Sum=0.0;Samples=(New-Object 'System.Collections.ArrayList')}
+                $clusters.Add($nearest)
+            }
+            $nearest.Count++
+            $nearest.Sum += $x
+            $nearest.Center=$nearest.Sum/$nearest.Count
+            if ($nearest.Samples.Count -lt 5) {[void]$nearest.Samples.Add([string]$w.Text)}
+        }
+        foreach ($c in @($clusters | Sort-Object Count -Descending | Select-Object -First 40)) {
+            $clusterOut.Add([pscustomobject]@{Page=[int]$pg.Name;X=[math]::Round($c.Center,2);Occurrences=$c.Count;Examples=($c.Samples -join ' | ')})
+        }
+    }
+    Write-Utf8Csv $lineOut (Join-Path $reportFolder 'VisualLines.csv')
+    Write-Utf8Csv $clusterOut (Join-Path $reportFolder 'XCandidates.csv')
+    Write-Utf8Csv $footerOut (Join-Path $reportFolder 'Footers.csv')
