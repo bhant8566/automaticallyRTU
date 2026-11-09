@@ -94,7 +94,7 @@ function Analyze-Report($reportName,$words) {
             $clusterOut.Add([pscustomobject]@{Page=[int]$pg.Name;X=[math]::Round($c.Center,2);Occurrences=$c.Count;Examples=($c.Samples -join ' | ')})
         }
     }
-Write-Utf8Csv $lineOut (Join-Path $reportFolder 'VisualLines.csv')
+    Write-Utf8Csv $lineOut (Join-Path $reportFolder 'VisualLines.csv')
     Write-Utf8Csv $clusterOut (Join-Path $reportFolder 'XCandidates.csv')
     Write-Utf8Csv $footerOut (Join-Path $reportFolder 'Footers.csv')
     $summary = [ordered]@{
